@@ -1,0 +1,480 @@
+import argparse
+import yaml
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
+
+from torchvision import transforms
+from utils_datasets.speedplus_utils_main.utils import *
+from train import train_one_epoch
+from eval import valid_one_epoch, eval_one_epoch
+
+# # from visuals import
+# def parse_args():
+#     parser = argparse.ArgumentParser(description="Run training/visualization/testing based on config.")
+#     parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox'],
+#                         help='Task to execute: train, visualization, or test')
+#     parser.add_argument('--config', type=str, default='configs/cfg.yaml',
+#                         help='Path to configuration file (YAML)')
+#     parser.add_argument('--resume', type=bool, default=True,
+#                         help='resume training')
+#     return parser.parse_args()
+
+def load_config(config_path):
+    """加载YAML配置文件"""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def build_dataset(config, split):
+    """根据配置构建数据集，split可以是'train'/'val'/'test'"""
+    dataset_config = config['DATASET']
+    transform_list = []
+    # for t in dataset_config.get('transform', []):
+    #     if t['type'] == 'Resize':
+    #         transform_list.append(transforms.Resize(t['size']))
+    #     elif t['type'] == 'ToTensor':
+    #         transform_list.append(transforms.ToTensor())
+    #     elif t['type'] == 'Normalize':
+    #         transform_list.append(transforms.Normalize(t['mean'], t['std']))
+    #     # 可根据需要添加更多变换
+    # transform = transforms.Compose(transform_list)
+    IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+    if dataset_config['NAME'] == 'speedplus':
+        import albumentations as A
+        if split == 'train':
+
+            # from styleaug import StyleAugmentor
+            # ex_aug = StyleAugmentor()
+
+            T = [
+
+                A.RandomBrightnessContrast(p=1),
+                # A.HorizontalFlip(p=0.5),
+                # A.VerticalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+                                   border_mode=cv2.BORDER_CONSTANT,
+                                   fill=0),
+                # BORDER_REFLECT,
+                # A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1, border_mode=cv2.BORDER_CONSTANT,
+                #                    value=0),
+
+                A.OneOf([
+                    # A.IAAAdditiveGaussianNoise(),
+                    A.GaussNoise(),
+                ], p=0.5),
+                A.OneOf([
+                    A.MotionBlur(p=0.5),
+                    A.MedianBlur(blur_limit=3, p=0.5),
+                    A.Blur(blur_limit=3, p=0.5),
+                ], p=1),
+                A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400, num_flare_circles_range=(1, 2),
+                                 p=config['TRAIN']['P_AUG_SUN']),
+                A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+            ]  # transforms
+            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
+                                                                  remove_invisible=False),
+                              additional_targets={
+                                  'mask': 'mask',  # 将 'mask' 映射到默认的 mask 处理
+                                  'coors': 'mask'  # 将 'coors' 也按照 mask 的规则处理
+                              }
+                              )
+        elif split == 'validation':
+            T = [
+                # A.Resize(height=cfg['MODEL']['IMAGE_SIZE'][1], width=cfg['MODEL']['IMAGE_SIZE'][0], always_apply=True),
+                # ToTensorV2(p=1),
+                A.Normalize(mean=IMAGENET_DEFAULT_MEAN,std=IMAGENET_DEFAULT_STD)
+            ]  # transforms
+            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
+                                                                  remove_invisible=False),
+                              # bbox_params=A.BboxParams(format='pascal_voc')
+                              )
+        else:
+            T = [
+                # A.Resize(height=cfg['MODEL']['IMAGE_SIZE'][1], width=cfg['MODEL']['IMAGE_SIZE'][0], always_apply=True),
+                # ToTensorV2(p=1),
+                A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+            ]  # transforms
+            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
+                                                                  remove_invisible=False),
+                              # bbox_params=A.BboxParams(format='pascal_voc')
+                              )
+
+        dataset = PyTorchSatellitePoseEstimationDataset(split=split, speed_root=dataset_config['train_root_dir'], points=points,
+                                                              transform=trans)
+
+    return dataset
+
+
+def build_model(config):
+    from Create_Ushape_net import Create_Ushape_Net
+    """根据配置构建模型"""
+    model_config = config['MODEL']
+
+    #构建U形模型
+    Encode_Type = model_config['BACKBONE']
+    output_channel = model_config['OUTPUT_CHANNELS']
+    BACKBONE_NAME = model_config['BACKBONE_NAME']
+    assert config['MODEL']['OUTPUT_CHANNELS'] == config['DATASET']['NUM_KEYPOINTS'], f"OUTPUT_CHANNELS 不等于 NUM_KEYPOINTS"
+    # 假设models模块有get_model函数
+    model = Create_Ushape_Net(Encode_Type=Encode_Type, Decode_Type=model_config['TYPE'], output_channel=output_channel, BACKBONE_NAME=BACKBONE_NAME,model_config=model_config)
+
+
+    return model
+
+def build_optimizer(config, model):
+    """根据配置构建优化器"""
+    train_config = config['TRAIN']
+    lr = float(train_config['LR'])
+    optimizer_name = train_config.get('OPTIM', 'SGD')
+    print('OPTIM: ',optimizer_name)
+    param_groups = [p for p in model.parameters() if p.requires_grad]
+    for name, param in model.named_parameters():
+        print(f"{name}: requires_grad={param.requires_grad}")
+    if optimizer_name == 'SGD':
+        optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9, weight_decay=1e-4)
+    elif optimizer_name == 'AdamW':
+        optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=5e-2, betas=(0.9, 0.95))
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+    return optimizer
+
+
+def get_warmup_scheduler(optimizer: Optimizer, warmup_steps: int = 1000, warmup_start_factor: float = 0.0):
+    """
+    返回一个 LambdaLR 调度器，在前 warmup_steps 步内将学习率从
+    warmup_start_factor * base_lr 线性增加到 base_lr。
+
+    参数:
+        optimizer: 优化器
+        warmup_steps: 预热步数
+        warmup_start_factor: 预热起始学习率相对于 base_lr 的比例（默认 0.0）
+    """
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # 线性增加：从 start_factor 到 1.0
+            return warmup_start_factor + (1.0 - warmup_start_factor) * (current_step / warmup_steps)
+        return 1.0  # 预热结束后保持原学习率（可后续再使用其他调度器）
+
+    return LambdaLR(optimizer, lr_lambda)
+
+def set_seed(seed=42):
+    # random.seed(seed)  # Python 内置随机
+    np.random.seed(seed)  # NumPy 随机
+    torch.manual_seed(seed)  # PyTorch CPU 随机
+    torch.cuda.manual_seed(seed)  # PyTorch GPU 随机（当前 GPU）
+    torch.cuda.manual_seed_all(seed)  # 所有 GPU 随机（多卡）
+
+    # 可选：设置 cuDNN 为确定性算法（可能降低性能）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+import uuid
+def generate_folder_name():
+    return str(uuid.uuid4())
+from typing import Any, Dict, List
+def _path_exists_and_is_leaf(config: Dict, path: str) -> bool:
+    """
+    检查点分隔路径是否存在于配置中，且最后一级不是字典（叶子节点）。
+    返回 True 表示存在且可覆盖。
+    """
+    keys = path.split('.')
+    d = config
+    for i, k in enumerate(keys):
+        if not isinstance(d, dict) or k not in d:
+            return False  # 中间节点缺失
+        if i == len(keys) - 1:
+            # 最后一级，检查是否为字典
+            return not isinstance(d[k], dict)
+        d = d[k]
+    return False  # 理论上不会执行到这里
+
+
+def update_config_from_args(config: Dict, args_list: List[str]) -> Dict:
+    """
+    从命令行参数列表更新配置字典，仅支持完整路径覆盖（如 --TRAIN.LR 1e-4），
+    且只更新配置中已存在的叶子节点。
+
+    Args:
+        config: 从YAML加载的配置字典。
+        args_list: 命令行参数列表（例如 sys.argv[1:] 或 parse_known_args 返回的未知参数）。
+
+    Returns:
+        更新后的配置字典。
+    """
+    # 1. 解析 args_list 为覆盖字典 {key_path: value_str}
+    overrides = {}
+    i = 0
+    n = len(args_list)
+    while i < n:
+        arg = args_list[i]
+        if not arg.startswith('--'):
+            i += 1
+            continue
+
+        # 处理 --key=value 形式
+        if '=' in arg:
+            key, value = arg[2:].split('=', 1)
+            overrides[key] = value
+            i += 1
+            continue
+
+        # 处理 --key value 形式
+        key = arg[2:]
+        if i + 1 < n and not args_list[i + 1].startswith('--'):
+            value = args_list[i + 1]
+            overrides[key] = value
+            i += 2
+        else:
+            # 无值参数视为标志，但此处建议显式传递值
+            print(f"警告：忽略无值的标志参数 {arg}，如需设置请使用 '--{key} True'")
+            i += 1
+
+    # 2. 类型转换函数（根据原值类型或自动检测）
+    def convert_value(value_str: str, ref_value: Any = None) -> Any:
+        # 布尔值处理
+        if value_str.lower() in ('true', 'yes', '1'):
+            return True
+        if value_str.lower() in ('false', 'no', '0'):
+            return False
+
+        # 有参考值时按参考类型转换
+        if ref_value is not None:
+            if isinstance(ref_value, bool):
+                return value_str.lower() in ('true', 'yes', '1')
+            if isinstance(ref_value, int):
+                return int(value_str)
+            if isinstance(ref_value, float):
+                return float(value_str)
+            # 其他类型（str, list等）保留字符串
+            return value_str
+
+        # 无参考值：自动检测
+        try:
+            return int(value_str)
+        except ValueError:
+            pass
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+        return value_str
+
+    # 3. 应用覆盖，仅对已存在的叶子节点更新
+    for key, value_str in overrides.items():
+        if '.' not in key:
+            print(f"警告：忽略参数 '{key}'，因为它不是完整路径（缺少点号），"
+                  f"如需覆盖请使用类似 '--TRAIN.LR 1e-4' 的格式。")
+            continue
+
+        # 检查路径是否存在且为叶子节点
+        if not _path_exists_and_is_leaf(config, key):
+            print(f"警告：忽略参数 '{key}'，因为配置中不存在该完整路径或指向非叶子节点。")
+            continue
+
+        keys = key.split('.')
+        # 导航到父节点
+        d = config
+        for k in keys[:-1]:
+            d = d[k]   # 路径已确保存在，无需检查
+
+        last_key = keys[-1]
+        old_value = d[last_key]
+        new_value = convert_value(value_str, old_value)
+
+        d[last_key] = new_value
+
+    return config
+
+
+from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
+from Hyperpose_net.losses.coors_loss import CoorsLoss, FocalLoss
+class Criterion:
+    def __init__(self, model_type):
+        """
+        初始化损失计算器
+        Args:
+            model_type: str, 模型类型，如 'classification', 'segmentation', 'regression', 'binary' 等
+            **kwargs: 额外参数，如 class_weight, ignore_index, reduction 等
+        """
+
+        self.model_type = model_type
+        self.los_fnc = {
+            'keypoints_gs':KeypointRCNNLoss(sigma=3),
+            'coordinates': CoorsLoss(),
+            'mask': nn.BCEWithLogitsLoss(),
+        }
+
+
+
+    def forward(self, outputs,imageshapes,target_dict):
+        """
+        计算损失
+        Args:
+            pred: 模型预测值 (logits 或原始输出)
+            target: 标签 (与 loss 函数要求一致)
+        Returns:
+            loss: 标量张量
+        """
+        total_loss = 0.0
+        if 'keypoints_gs' in self.model_type:
+            total_loss += self.los_fnc['keypoints_gs'](outputs['keypoints_gs'],imageshapes,target_dict['keypoints_gs'])
+        if 'coordinates' in self.model_type:
+            mask_bool=(target_dict['mask']>0.5).unsqueeze(1).expand_as(outputs['coordinates'])
+            total_loss += self.los_fnc['coordinates'](outputs['coordinates'][mask_bool],target_dict['coordinates'][mask_bool])
+            total_loss += 1 * self.los_fnc['mask'](outputs['mask'].squeeze(),target_dict['mask'].squeeze())
+        return total_loss
+
+    # 也可以直接使用 __call__ 让实例像函数一样调用
+    def __call__(self, outputs,imageshapes,target_dict):
+        return self.forward(outputs,imageshapes,target_dict)
+
+
+def parse_args():
+    """示例参数解析器，使用 parse_known_args 捕获未知参数用于覆盖配置。"""
+    parser = argparse.ArgumentParser(description="Run training/visualization/testing based on config.")
+    parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox'],
+                        help='Task to execute: train, visualization, or test')
+    parser.add_argument('--config', type=str, default='configs/cfg.yaml',
+                        help='Path to configuration file (YAML)')
+    parser.add_argument('--resume', action='store_true', help='resume training')
+    # parser.add_argument('--gpu', type=int, nargs='+', default=[0],
+    #                 help='GPU device IDs to use (e.g., --gpu 0 1 2)')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU device ID')
+    parser.add_argument('--model_type', nargs='+',
+                        help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
+    # 使用 parse_known_args 以接受额外参数
+    args, unknown = parser.parse_known_args()
+    return args, unknown
+
+
+def main():
+    # 解析命令行参数（已知和未知）
+    args, unknown = parse_args()
+    config = load_config(args.config)
+    if args.model_type is not None:
+        config['MODEL']['TYPE'] = args.model_type
+    config = update_config_from_args(config, unknown)
+    set_seed(42)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cpu')
+    # 构建模型
+    model = build_model(config)
+
+    model.to(device)
+
+    if args.mode != 'train' or args.resume is True:
+        checkpoint = torch.load('./workingdir/b0967cf5-517b-4c40-8455-88dc30b6b40f/model_final.pth')
+        model.load_state_dict(checkpoint, strict=True)
+
+    # 构建数据集（根据模式选择split）
+    if args.mode == 'train':
+        train_dataset = build_dataset(config, 'train')
+        val_dataset = build_dataset(config, 'validation')
+        train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
+                                  shuffle=True, num_workers=1)
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
+
+        sunlamp_dataset = build_dataset(config, 'sunlamp')
+        sunlamp_loader = DataLoader(sunlamp_dataset, batch_size=1, shuffle=False, num_workers=1)
+
+        lightbox_dataset = build_dataset(config, 'lightbox')
+        lightbox_loader = DataLoader(lightbox_dataset, batch_size=1, shuffle=False, num_workers=1)
+
+        end_path_name = config['TRAIN']['SAVE_DIR'] + "/" + generate_folder_name()
+        os.mkdir(end_path_name)
+        print(f'Files Saving in Path{end_path_name}')
+
+    elif args.mode == 'sunlamp':
+        # 可视化可以使用任意split，比如'train'或'val'，根据需要
+        vis_dataset = build_dataset(config, 'sunlamp')
+        vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+        # vis_dataset = build_dataset(config, 'validation')
+        # vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+    elif args.mode == 'lightbox':
+        # 可视化可以使用任意split，比如'train'或'val'，根据需要
+        vis_dataset = build_dataset(config, 'lightbox')
+        vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+    else:  # test
+        test_dataset = build_dataset(config, args.mode)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
+
+
+    if args.mode == 'train':
+
+        valid_losses=[]
+        train_losses=[]
+
+        criterion = Criterion(model_type=config['MODEL']['TYPE'])
+        optimizer = build_optimizer(config, model)
+        scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
+        epochs = config['TRAIN']['MAX_EPOCH']
+        for epoch in range(epochs):
+            train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
+            print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
+
+            val_loss = valid_one_epoch(model, val_loader, config['MODEL']['TYPE'], criterion, device)
+            print(f"Validation Loss: {val_loss:.4f}")
+
+            train_losses.append(train_loss.item())
+            valid_losses.append(val_loss.item())
+
+            # train_losses.append(0)
+            # valid_losses.append(0)
+
+            # torch.save(model.state_dict(), end_path_name + f'/e_{epoch}.pth')
+        # 保存模型等操作
+        SAVE_DATA={'valid_losses':valid_losses,
+                   'train_losses':train_losses,
+                   "model_info": config['MODEL'],
+                   "train_info": config['TRAIN']
+                   }
+        # 写入JSON文件
+        with open(end_path_name+'/train_info.json', 'w', encoding='utf-8') as f:
+            json.dump(SAVE_DATA, f)
+        print('testing on sunlamp...')
+        result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+        for name, data in result_dict.items():
+            file_path = f"{end_path_name}/sunlamp_result_{name}.json"
+            with open(file_path, 'w') as f:
+                json.dump(data, f)
+        # with open(end_path_name + '/sunlamp_result.json', 'w') as f:
+        #     json.dump(result_dict, f)
+
+
+        print('testing on lightbox...')
+        result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+        for name, data in result_dict.items():
+            file_path = f"{end_path_name}/lightbox_result_{name}.json"
+            with open(file_path, 'w') as f:
+                json.dump(data, f)
+        #
+        # with open(end_path_name + '/lightbox_result.json', 'w') as f:
+        #     json.dump(result_dict, f)
+        # results=eval_one_epoch(model, val_loader, criterion, Camera.K, device)
+        torch.save(model.state_dict(), end_path_name+'/model_final.pth')
+
+    elif args.mode == 'sunlamp' or args.mode == 'lightbox':
+        # 可视化示例：显示几个预测结果
+        import matplotlib.pyplot as plt
+        model.eval()
+        with torch.no_grad():
+            from vis import eval_one_epoch_visualization
+            eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device)
+
+    else:  # test
+        from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
+        criterion = KeypointRCNNLoss(sigma=3)
+        result_dict=eval_one_epoch(model, test_loader, criterion, Camera.K, device)
+        with open(f'./save_text/{args.mode}_result.json', 'w') as f:
+            json.dump(result_dict, f)
+        # print(f"Test Accuracy: {accuracy:.4f}")
+
+if __name__ == '__main__':
+    main()

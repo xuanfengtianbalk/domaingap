@@ -1,0 +1,8 @@
+name: dinov3
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - omegaconf
+  - matplotlib
+prefix: /home/liukun/miniconda3/envs/dinov3

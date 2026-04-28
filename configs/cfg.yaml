@@ -1,0 +1,26 @@
+MODEL:
+  INIT_WEIGHTS: true
+  TYPE: [] # coordinates, softass, keypoints_gs, keypoints_set
+  BACKBONE: "dinov3" # swin transformer
+  BACKBONE_NAME: "dinov3_vits16"
+  DECODE_HEAD: "SegformerHead" #BNHead
+  OUTPUT_CHANNELS: 11
+  ACTIVATE: 'softmax' # None, sigmoid, softmax...
+
+TRAIN:
+  LR: 5e-4
+  OPTIM: 'AdamW'
+  MAX_EPOCH: 1
+  SAVE_DIR: 'workingdir'
+  BATCH_SIZE: 16
+  P_AUG_SUN: 0.0
+
+TEST:
+  SAVE_DIR: 'test'
+
+DATASET:
+  NAME: "speedplus"
+  train_root_dir: './datasets/speedplus/speedplus'
+  val_root_dir: './datasets/speedplus/speedplus'
+  test_root_dir: './datasets/speedplus/speedplus'
+  NUM_KEYPOINTS: 11

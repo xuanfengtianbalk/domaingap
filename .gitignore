@@ -1,0 +1,12 @@
+datasets/
+workingdir/
+__pycache__/
+.idea/
+*.pyc
+.DS_Store
+*.zip
+*.tar.gz
+*.pth
+*.ipynb
+save_text/
+visuals/
