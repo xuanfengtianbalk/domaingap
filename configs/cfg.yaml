@@ -12,7 +12,7 @@ TRAIN:
   OPTIM: 'AdamW'
   MAX_EPOCH: 1
   SAVE_DIR: 'workingdir'
-  BATCH_SIZE: 16
+  BATCH_SIZE: 32
   P_AUG_SUN: 0.0
 
 TEST:

@@ -4,7 +4,9 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -179,6 +181,17 @@ import uuid
 def generate_folder_name():
     return str(uuid.uuid4())
 from typing import Any, Dict, List
+
+def setup_ddp():
+    """Initialize DDP if launched with torchrun, returns (rank, world_size, local_rank)."""
+    if 'LOCAL_RANK' in os.environ:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        dist.init_process_group(backend='nccl', init_method='env://')
+        torch.cuda.set_device(local_rank)
+        return rank, world_size, local_rank
+    return 0, 1, 0
 def _path_exists_and_is_leaf(config: Dict, path: str) -> bool:
     """
     检查点分隔路径是否存在于配置中，且最后一级不是字典（叶子节点）。
@@ -344,9 +357,8 @@ def parse_args():
     parser.add_argument('--config', type=str, default='configs/cfg.yaml',
                         help='Path to configuration file (YAML)')
     parser.add_argument('--resume', action='store_true', help='resume training')
-    # parser.add_argument('--gpu', type=int, nargs='+', default=[0],
-    #                 help='GPU device IDs to use (e.g., --gpu 0 1 2)')
-    parser.add_argument('--gpu', type=int, default=0, help='GPU device ID')
+    parser.add_argument('--gpu', type=int, nargs='+', default=[0],
+                    help='GPU device IDs to use (e.g., --gpu 0 1 2)')
     parser.add_argument('--model_type', nargs='+',
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
     # 使用 parse_known_args 以接受额外参数
@@ -355,19 +367,35 @@ def parse_args():
 
 
 def main():
+    rank, world_size, local_rank = setup_ddp()
+    is_master = (rank == 0)
+
     # 解析命令行参数（已知和未知）
     args, unknown = parse_args()
     config = load_config(args.config)
     if args.model_type is not None:
         config['MODEL']['TYPE'] = args.model_type
     config = update_config_from_args(config, unknown)
-    set_seed(42)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    set_seed(42 + rank)
+
+    if world_size > 1:
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        gpu_ids = args.gpu
+        device = torch.device(f'cuda:{gpu_ids[0]}' if torch.cuda.is_available() else 'cpu')
     # device = torch.device('cpu')
     # 构建模型
     model = build_model(config)
 
     model.to(device)
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                     find_unused_parameters=False)
+        if is_master:
+            print(f"Using DDP on {world_size} GPUs")
+    elif len(args.gpu) > 1 and torch.cuda.is_available():
+        model = torch.nn.DataParallel(model, device_ids=args.gpu)
+        print(f"Using DataParallel on GPUs: {args.gpu}")
 
     if args.mode != 'train' or args.resume is True:
         checkpoint = torch.load('./workingdir/b0967cf5-517b-4c40-8455-88dc30b6b40f/model_final.pth')
@@ -377,8 +405,11 @@ def main():
     if args.mode == 'train':
         train_dataset = build_dataset(config, 'train')
         val_dataset = build_dataset(config, 'validation')
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
+                                           shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
-                                  shuffle=True, num_workers=1)
+                                  shuffle=(train_sampler is None), num_workers=1,
+                                  sampler=train_sampler)
         val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
 
         sunlamp_dataset = build_dataset(config, 'sunlamp')
@@ -388,8 +419,9 @@ def main():
         lightbox_loader = DataLoader(lightbox_dataset, batch_size=1, shuffle=False, num_workers=1)
 
         end_path_name = config['TRAIN']['SAVE_DIR'] + "/" + generate_folder_name()
-        os.mkdir(end_path_name)
-        print(f'Files Saving in Path{end_path_name}')
+        if is_master:
+            os.mkdir(end_path_name)
+            print(f'Files Saving in Path {end_path_name}')
 
     elif args.mode == 'sunlamp':
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
@@ -416,11 +448,15 @@ def main():
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
         epochs = config['TRAIN']['MAX_EPOCH']
         for epoch in range(epochs):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
             train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
-            print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
+            if is_master:
+                print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
 
             val_loss = valid_one_epoch(model, val_loader, config['MODEL']['TYPE'], criterion, device)
-            print(f"Validation Loss: {val_loss:.4f}")
+            if is_master:
+                print(f"Validation Loss: {val_loss:.4f}")
 
             train_losses.append(train_loss.item())
             valid_losses.append(val_loss.item())
@@ -430,35 +466,29 @@ def main():
 
             # torch.save(model.state_dict(), end_path_name + f'/e_{epoch}.pth')
         # 保存模型等操作
-        SAVE_DATA={'valid_losses':valid_losses,
-                   'train_losses':train_losses,
-                   "model_info": config['MODEL'],
-                   "train_info": config['TRAIN']
-                   }
-        # 写入JSON文件
-        with open(end_path_name+'/train_info.json', 'w', encoding='utf-8') as f:
-            json.dump(SAVE_DATA, f)
-        print('testing on sunlamp...')
-        result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
-        for name, data in result_dict.items():
-            file_path = f"{end_path_name}/sunlamp_result_{name}.json"
-            with open(file_path, 'w') as f:
-                json.dump(data, f)
-        # with open(end_path_name + '/sunlamp_result.json', 'w') as f:
-        #     json.dump(result_dict, f)
+        if is_master:
+            SAVE_DATA={'valid_losses':valid_losses,
+                       'train_losses':train_losses,
+                       "model_info": config['MODEL'],
+                       "train_info": config['TRAIN']
+                       }
+            # 写入JSON文件
+            with open(end_path_name+'/train_info.json', 'w', encoding='utf-8') as f:
+                json.dump(SAVE_DATA, f)
+            print('testing on sunlamp...')
+            result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+            for name, data in result_dict.items():
+                file_path = f"{end_path_name}/sunlamp_result_{name}.json"
+                with open(file_path, 'w') as f:
+                    json.dump(data, f)
 
-
-        print('testing on lightbox...')
-        result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
-        for name, data in result_dict.items():
-            file_path = f"{end_path_name}/lightbox_result_{name}.json"
-            with open(file_path, 'w') as f:
-                json.dump(data, f)
-        #
-        # with open(end_path_name + '/lightbox_result.json', 'w') as f:
-        #     json.dump(result_dict, f)
-        # results=eval_one_epoch(model, val_loader, criterion, Camera.K, device)
-        torch.save(model.state_dict(), end_path_name+'/model_final.pth')
+            print('testing on lightbox...')
+            result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+            for name, data in result_dict.items():
+                file_path = f"{end_path_name}/lightbox_result_{name}.json"
+                with open(file_path, 'w') as f:
+                    json.dump(data, f)
+            torch.save(model.state_dict(), end_path_name+'/model_final.pth')
 
     elif args.mode == 'sunlamp' or args.mode == 'lightbox':
         # 可视化示例：显示几个预测结果
@@ -475,6 +505,9 @@ def main():
         with open(f'./save_text/{args.mode}_result.json', 'w') as f:
             json.dump(result_dict, f)
         # print(f"Test Accuracy: {accuracy:.4f}")
+
+    if world_size > 1:
+        dist.destroy_process_group()
 
 if __name__ == '__main__':
     main()
