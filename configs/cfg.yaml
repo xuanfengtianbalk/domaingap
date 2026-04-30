@@ -5,14 +5,14 @@ MODEL:
   BACKBONE_NAME: "dinov3_vits16"
   DECODE_HEAD: "SegformerHead" #BNHead
   OUTPUT_CHANNELS: 11
-  ACTIVATE: 'softmax' # None, sigmoid, softmax...
+  ACTIVATE: 'None' # None, sigmoid, softmax...
 
 TRAIN:
   LR: 5e-4
   OPTIM: 'AdamW'
   MAX_EPOCH: 1
   SAVE_DIR: 'workingdir'
-  BATCH_SIZE: 32
+  BATCH_SIZE: 16
   P_AUG_SUN: 0.0
 
 TEST:

@@ -55,7 +55,7 @@ def build_dataset(config, split):
             # ex_aug = StyleAugmentor()
 
             T = [
-
+                A.Resize(height=300, width=480, p=1),
                 A.RandomBrightnessContrast(p=1),
                 # A.HorizontalFlip(p=0.5),
                 # A.VerticalFlip(p=0.5),
@@ -88,7 +88,7 @@ def build_dataset(config, split):
                               )
         elif split == 'validation':
             T = [
-                # A.Resize(height=cfg['MODEL']['IMAGE_SIZE'][1], width=cfg['MODEL']['IMAGE_SIZE'][0], always_apply=True),
+                A.Resize(height=300, width=480, p=1),
                 # ToTensorV2(p=1),
                 A.Normalize(mean=IMAGENET_DEFAULT_MEAN,std=IMAGENET_DEFAULT_STD)
             ]  # transforms
@@ -339,9 +339,11 @@ class Criterion:
         if 'keypoints_gs' in self.model_type:
             total_loss += self.los_fnc['keypoints_gs'](outputs['keypoints_gs'],imageshapes,target_dict['keypoints_gs'])
         if 'coordinates' in self.model_type:
-            mask_bool=(target_dict['mask']>0.5).unsqueeze(1).expand_as(outputs['coordinates'])
-            total_loss += self.los_fnc['coordinates'](outputs['coordinates'][mask_bool],target_dict['coordinates'][mask_bool])
-            total_loss += 1 * self.los_fnc['mask'](outputs['mask'].squeeze(),target_dict['mask'].squeeze())
+            mask = (target_dict['mask'] > 0.5)
+            total_loss += self.los_fnc['coordinates'](
+                outputs['coordinates'].permute(0,2,3,1)[mask],
+                target_dict['coordinates'].permute(0,2,3,1)[mask])
+            total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         return total_loss
 
     # 也可以直接使用 __call__ 让实例像函数一样调用
@@ -398,19 +400,20 @@ def main():
         print(f"Using DataParallel on GPUs: {args.gpu}")
 
     if args.mode != 'train' or args.resume is True:
-        checkpoint = torch.load('./workingdir/b0967cf5-517b-4c40-8455-88dc30b6b40f/model_final.pth')
+        checkpoint = torch.load('./workingdir/2225f8b6-d0b4-45d1-8247-f7d6c1635f5a/model_final.pth')
         model.load_state_dict(checkpoint, strict=True)
 
     # 构建数据集（根据模式选择split）
     if args.mode == 'train':
         train_dataset = build_dataset(config, 'train')
-        val_dataset = build_dataset(config, 'validation')
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
                                            shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
-                                  shuffle=(train_sampler is None), num_workers=1,
+                                  shuffle=(train_sampler is None), num_workers=8,
+                                  pin_memory=True, persistent_workers=True,
                                   sampler=train_sampler)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
+        val_dataset = build_dataset(config, 'validation')
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2)
 
         sunlamp_dataset = build_dataset(config, 'sunlamp')
         sunlamp_loader = DataLoader(sunlamp_dataset, batch_size=1, shuffle=False, num_workers=1)
@@ -425,10 +428,10 @@ def main():
 
     elif args.mode == 'sunlamp':
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
-        vis_dataset = build_dataset(config, 'sunlamp')
-        vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
-        # vis_dataset = build_dataset(config, 'validation')
+        # vis_dataset = build_dataset(config, 'sunlamp')
         # vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+        vis_dataset = build_dataset(config, 'validation')
+        vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
     elif args.mode == 'lightbox':
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
         vis_dataset = build_dataset(config, 'lightbox')

@@ -538,6 +538,7 @@ if has_pytorch:
                                for label in label_list}
             self.transform = transform
             self.points = points
+            self.to_tensor = A.Compose([ToTensorV2(p=1.0)])
 
 
         def get_labels(self):
@@ -557,45 +558,22 @@ if has_pytorch:
                 x1, y1, distance = myproject2(p_axes=p_axes, q=q, r=r)
             return [[x, y, 0] for x, y in zip(x1, y1)], distance
 
-        def calaulate_padded(self, y, partition='train'):
-            if partition == 'train':
-                x1 = 9999
-                x2 = 0
-                y1 = 9999
-                y2 = 0
-                for b in y:
-                    if b[0] < x1: x1 = b[0]
-                    if b[0] > x2: x2 = b[0]
-                    if b[1] < y1: y1 = b[1]
-                    if b[1] > y2: y2 = b[1]
-            x_all = (x2 - x1)
-            y_all = (y2 - y1)
-            if x1 < 0:
-                x1 = 0
-            if x2 > 1920:
-                x2 = 1920
-            if y1 < 0:
-                y1 = 0
-            if y2 > 1200:
-                y2 = 1200
-            x_vis = (x2 - x1)
-            y_vis = (y2 - y1)
-            padded_ratio=1-(x_vis*y_vis)/(x_all*y_all)
-            return padded_ratio
-        def calculate_boxes(self, y, partition='train'):
-            if partition == 'train':
-                x1 = 9999
-                x2 = 0
-                y1 = 9999
-                y2 = 0
-                for b in y:
-                    if b[0] < x1: x1 = b[0]
-                    if b[0] > x2: x2 = b[0]
-                    if b[1] < y1: y1 = b[1]
-                    if b[1] > y2: y2 = b[1]
-            x_add = (x2 - x1) / 10
-            y_add = (y2 - y1) / 10
-            return [x1 - x_add, y1 - y_add, x2 + x_add, y2 + y_add]
+        def calculate_boxes_and_padded(self, y):
+            x1 = y[:, 0].min().item()
+            x2 = y[:, 0].max().item()
+            y1 = y[:, 1].min().item()
+            y2 = y[:, 1].max().item()
+            x_all = x2 - x1
+            y_all = y2 - y1
+            cx1, cx2 = max(x1, 0), min(x2, 1920)
+            cy1, cy2 = max(y1, 0), min(y2, 1200)
+            x_vis = cx2 - cx1
+            y_vis = cy2 - cy1
+            padded_ratio = 1 - (x_vis * y_vis) / (x_all * y_all) if x_all * y_all > 0 else 0
+            x_add = x_all / 10
+            y_add = y_all / 10
+            box = [x1 - x_add, y1 - y_add, x2 + x_add, y2 + y_add]
+            return box, padded_ratio
 
         def whitening(self, img):
             img = img / 255.0
@@ -620,7 +598,7 @@ if has_pytorch:
             #         keypoints.append([x, y, 1])
             #     else:             #         keypoints.append([x, y, 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
-            b = self.calculate_boxes(k)
+            b, _ = self.calculate_boxes_and_padded(k)
             return b
 
 
@@ -669,30 +647,13 @@ if has_pytorch:
             return world_coords
 
         def read_depth(self, path):
-            # 读取 EXR 文件
             import OpenEXR
             import Imath
             exr_file = OpenEXR.InputFile(path)
-
-            # 获取图像尺寸
-            # dw = exr_file.header()['dataWindow']
-            width = Camera.nu
-            height = Camera.nv
-
-            # 读取图像通道（例如 R、G、B）
             FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
             r_str = exr_file.channel('R', FLOAT)
-            g_str = exr_file.channel('G', FLOAT)
-            b_str = exr_file.channel('B', FLOAT)
-
-            # 转换为 NumPy 数组
-            r = np.frombuffer(r_str, dtype=np.float32).reshape(height, width)
-            g = np.frombuffer(g_str, dtype=np.float32).reshape(height, width)
-            b = np.frombuffer(b_str, dtype=np.float32).reshape(height, width)
-            image = np.stack([r, g, b], axis=-1)
-            depth = image[..., 0]
-
-            return depth  # shape(height, width)
+            depth = np.frombuffer(r_str, dtype=np.float32).reshape(Camera.nv, Camera.nu)
+            return depth
 
         def get_coors(self,depth_path,pose):
             # depth_path = os.path.join(self.depth_path, depth_name)
@@ -790,18 +751,14 @@ if has_pytorch:
                 else:
                     keypoints.append([x, y, 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
-            b = self.calculate_boxes(k)
-
-            padded_ratio = self.calaulate_padded(k)
+            b, padded_ratio = self.calculate_boxes_and_padded(k)
             target_dict["padded_ratio"] = padded_ratio
 
             k = torch.reshape(k, (-1, 3))
             b = torch.reshape(torch.tensor(b), (-1, 4))
 
 
-            trans = A.Compose([
-                ToTensorV2(p=1.0), ]
-            )
+            trans = self.to_tensor
 
 
 
@@ -1300,6 +1257,7 @@ if __name__ == "__main__":
     config = {'TRAIN': {'P_AUG_SUN': 0.5}}  # 示例配置，根据实际调整
 
     T = [
+        # A.Resize(height=300, width=480, p=1),
         A.RandomBrightnessContrast(p=1),
         # A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
         #                    border_mode=cv2.BORDER_CONSTANT, fill=1),
