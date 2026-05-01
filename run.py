@@ -340,9 +340,10 @@ class Criterion:
             total_loss += self.los_fnc['keypoints_gs'](outputs['keypoints_gs'],imageshapes,target_dict['keypoints_gs'])
         if 'coordinates' in self.model_type:
             mask = (target_dict['mask'] > 0.5)
-            total_loss += self.los_fnc['coordinates'](
-                outputs['coordinates'].permute(0,2,3,1)[mask],
-                target_dict['coordinates'].permute(0,2,3,1)[mask])
+            if mask.sum() > 0:
+                total_loss += self.los_fnc['coordinates'](
+                    outputs['coordinates'].permute(0,2,3,1)[mask],
+                    target_dict['coordinates'].permute(0,2,3,1)[mask])
             total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         return total_loss
 
@@ -413,7 +414,7 @@ def main():
                                   pin_memory=True, persistent_workers=True,
                                   sampler=train_sampler)
         val_dataset = build_dataset(config, 'validation')
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=2)
 
         sunlamp_dataset = build_dataset(config, 'sunlamp')
         sunlamp_loader = DataLoader(sunlamp_dataset, batch_size=1, shuffle=False, num_workers=1)
