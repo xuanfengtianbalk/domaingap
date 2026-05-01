@@ -267,6 +267,7 @@ def build_depther(
     Decode_Type = ["keypoints_gs"],
     output_channel = 11,
     activate=None,
+    train_backbone: bool = False,
     **kwargs,
 ):
     # 处理 Decode_Type：统一转换为列表，便于统一处理
@@ -280,6 +281,7 @@ def build_depther(
         backbone_out_layers=backbone_out_layers,
         use_backbone_norm=use_backbone_norm,
         adapt_to_patch_size=adapt_to_patch_size,
+        train_backbone=train_backbone,
     )
 
     # decoder = make_head(

@@ -46,6 +46,7 @@ def Create_Ushape_Net(Encode_Type='dinov3',Decode_Type=["keypoints_gs"], output_
         # norm_strategy=config.norm_strategy,
         Decode_Type=Decode_Type,
         output_channel = output_channel,
-        activate = model_config['ACTIVATE']
+        activate = model_config['ACTIVATE'],
+        train_backbone = model_config.get('TRAIN_BACKBONE', False)
     )
     return depther_model

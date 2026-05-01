@@ -67,6 +67,7 @@ class DinoVisionTransformerWrapper(nn.Module):
         backbone_out_layers: str | tuple[int, ...] | BackboneLayersSet,
         use_backbone_norm: bool = False,
         adapt_to_patch_size: PatchSizeAdaptationStrategy = PatchSizeAdaptationStrategy.CENTER_PADDING,
+        train_backbone: bool = False,
     ):
         super().__init__()
 
@@ -100,7 +101,8 @@ class DinoVisionTransformerWrapper(nn.Module):
             self.patch_size_adapter = StretchToMultiple(input_pad_size)
 
         # Freeze backbone
-        self.backbone.requires_grad_(False)
+        # print(freeze_backbone)
+        self.backbone.requires_grad_(train_backbone)
 
     def forward(
         self,

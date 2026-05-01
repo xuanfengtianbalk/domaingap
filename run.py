@@ -94,7 +94,10 @@ def build_dataset(config, split):
             ]  # transforms
             trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
                                                                   remove_invisible=False),
-                              # bbox_params=A.BboxParams(format='pascal_voc')
+                              additional_targets={
+                                  'mask': 'mask',  # 将 'mask' 映射到默认的 mask 处理
+                                  'coors': 'mask'  # 将 'coors' 也按照 mask 的规则处理
+                              }
                               )
         else:
             T = [
@@ -340,10 +343,9 @@ class Criterion:
             total_loss += self.los_fnc['keypoints_gs'](outputs['keypoints_gs'],imageshapes,target_dict['keypoints_gs'])
         if 'coordinates' in self.model_type:
             mask = (target_dict['mask'] > 0.5)
-            if mask.sum() > 0:
-                total_loss += self.los_fnc['coordinates'](
-                    outputs['coordinates'].permute(0,2,3,1)[mask],
-                    target_dict['coordinates'].permute(0,2,3,1)[mask])
+            total_loss += self.los_fnc['coordinates'](
+                outputs['coordinates'].permute(0,2,3,1)[mask],
+                target_dict['coordinates'].permute(0,2,3,1)[mask])
             total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         return total_loss
 
@@ -364,6 +366,8 @@ def parse_args():
                     help='GPU device IDs to use (e.g., --gpu 0 1 2)')
     parser.add_argument('--model_type', nargs='+',
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
+    parser.add_argument('--train_backbone', action='store_true', default=False,
+                        help='Unfreeze dinov3 backbone for training (default: frozen)')
     # 使用 parse_known_args 以接受额外参数
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -378,6 +382,7 @@ def main():
     config = load_config(args.config)
     if args.model_type is not None:
         config['MODEL']['TYPE'] = args.model_type
+    config['MODEL']['TRAIN_BACKBONE'] = args.train_backbone
     config = update_config_from_args(config, unknown)
     set_seed(42 + rank)
 
@@ -414,7 +419,7 @@ def main():
                                   pin_memory=True, persistent_workers=True,
                                   sampler=train_sampler)
         val_dataset = build_dataset(config, 'validation')
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=config['TRAIN']['BATCH_SIZE'], shuffle=False, num_workers=8)
 
         sunlamp_dataset = build_dataset(config, 'sunlamp')
         sunlamp_loader = DataLoader(sunlamp_dataset, batch_size=1, shuffle=False, num_workers=1)
