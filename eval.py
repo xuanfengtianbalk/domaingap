@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from utils_datasets.speedplus_utils_main.my_augmentation import crop_tensor_image
 from tqdm import tqdm
 
@@ -28,7 +29,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
             for img, target in zip(samples, target_list):
                 gtbbox = torch.round(target["boxes"].squeeze(0))
                 org_imgs_list.append(crop_tensor_image(img, gtbbox).to(device))
-                if 'coordinates' in model_type:
+                if 'coordinates' in model_type or 'coordinates_gs' in model_type:
                     coors_gt_list.append(crop_tensor_image(target["coors_gt"], gtbbox).to(device))
                     mask_gt_list.append(crop_tensor_image(target["mask_gt"].float().unsqueeze(0), gtbbox).squeeze(0).to(device))
                 if 'keypoints_gs' in model_type:
@@ -36,7 +37,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
                 imageshapes.append(torch.tensor([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]]))
             with torch.amp.autocast('cuda'):
                 inputs = torch.stack([torch.nn.functional.interpolate(img_.unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0) for img_ in org_imgs_list])
-                if 'coordinates' in model_type:
+                if 'coordinates' in model_type or 'coordinates_gs' in model_type:
                     coors_gt = torch.stack([torch.nn.functional.interpolate(c_.unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0) for c_ in coors_gt_list])
                     mask_gt = torch.stack([torch.nn.functional.interpolate(m_.unsqueeze(0).unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0).squeeze(0) for m_ in mask_gt_list])
                     target_dict['coordinates'] = coors_gt
@@ -50,7 +51,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
     return torch.tensor(losses_epoch).mean()
 
 
-def eval_one_epoch(model, dataloader, model_type, criterion, K, device):
+def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None):
     model.eval()
 
     result_dicts = {}
@@ -164,6 +165,24 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device):
                     # 'gt_kps': gtkp.tolist()
                 }
                 result_dicts['coordinates'].append(result_dict)
+
+            if 'coordinates_gs' in model_type and bc is not None:
+                out = outputs['coordinates_gs'].detach()
+                B, _, H, W = out.shape
+                total_bins = bc.total_bins
+                out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # (B,H,W,3,bins)
+                out = F.softmax(out, dim=-1)  # logits → probs
+                coormap_value = bc.bins_to_value(out)  # (B,H,W,3)
+                coormap_value = coormap_value.permute(0, 3, 1, 2)  # (B,3,H,W)
+                mask_bool_est_ = activate(outputs['mask']) > 0.5
+                mask_bool_est = mask_bool_est_.expand_as(coormap_value).cpu()
+                coormap_value[~mask_bool_est] = float('nan')
+                print('test of coordinates_gs')
+                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, coormap_value.squeeze().permute(2,1,0).cpu().numpy(), gtbbox.cpu().numpy())
+                err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(
+                    coors_qvecs, coors_tvecs, qgt, rgt, is_true)
+                result_dict = {'err_ori': err_ori_deg.tolist(), 'los_r': err_r_abs.tolist()}
+                result_dicts['coordinates_gs'].append(result_dict)
 
 
     # # print('training/loss_all', )

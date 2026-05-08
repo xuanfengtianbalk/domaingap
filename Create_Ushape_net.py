@@ -14,8 +14,6 @@ from dinov3.eval.depth.models.encoder import BackboneLayersSet as bls
 def Create_Ushape_Net(Encode_Type='dinov3',Decode_Type=["keypoints_gs"], output_channel=11,BACKBONE_NAME='dinov3_vits16', model_config=None):
     if Encode_Type == 'dinov3':
         REPO_DIR = '/opt/dl_workspace/algorithm/04-myself/domaingap/dinov3_main'
-        # BACKBONE_NAME = 'dinov3_vits16'  # dinov3_vits16plus dinov3_vits16
-
         WEIGHT_DICT = {'dinov3_vits16': 'dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
                        'dinov3_vits16plus': 'dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth',
                        'dinov3_vitb16': 'dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth',

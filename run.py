@@ -126,11 +126,23 @@ def build_model(config):
     output_channel = model_config['OUTPUT_CHANNELS']
     BACKBONE_NAME = model_config['BACKBONE_NAME']
     assert config['MODEL']['OUTPUT_CHANNELS'] == config['DATASET']['NUM_KEYPOINTS'], f"OUTPUT_CHANNELS 不等于 NUM_KEYPOINTS"
-    # 假设models模块有get_model函数
+
+    # Create bin converter for coordinates_gs
+    bc = None
+    if 'coordinates_gs' in model_config.get('TYPE', []):
+        from Hyperpose_net.losses.bin_converter import BinConverter
+        bc_cfg = model_config.get('BIN_CONVERTER', {})
+        bc = BinConverter(
+            sample_range=bc_cfg.get('SAMPLE_RANGE', [-0.5, 0.5]),
+            n_per_unit=bc_cfg.get('N_PER_UNIT', 30),
+            sigma_factor=bc_cfg.get('SIGMA_FACTOR', 1.5),
+        )
+        # 3 channels (x,y,z) per keypoint × bin count
+        output_channel = 3 * bc.total_bins
+
     model = Create_Ushape_Net(Encode_Type=Encode_Type, Decode_Type=model_config['TYPE'], output_channel=output_channel, BACKBONE_NAME=BACKBONE_NAME,model_config=model_config)
 
-
-    return model
+    return model, bc
 
 def build_optimizer(config, model):
     """根据配置构建优化器"""
@@ -312,20 +324,14 @@ def update_config_from_args(config: Dict, args_list: List[str]) -> Dict:
 from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
 from Hyperpose_net.losses.coors_loss import CoorsLoss, FocalLoss
 class Criterion:
-    def __init__(self, model_type):
-        """
-        初始化损失计算器
-        Args:
-            model_type: str, 模型类型，如 'classification', 'segmentation', 'regression', 'binary' 等
-            **kwargs: 额外参数，如 class_weight, ignore_index, reduction 等
-        """
-
+    def __init__(self, model_type, bc=None):
         self.model_type = model_type
         self.los_fnc = {
-            'keypoints_gs':KeypointRCNNLoss(sigma=3),
+            'keypoints_gs': KeypointRCNNLoss(sigma=3),
             'coordinates': CoorsLoss(),
             'mask': nn.BCEWithLogitsLoss(),
         }
+        self.bc = bc  # BinConverter for coordinates_gs
 
 
 
@@ -346,6 +352,19 @@ class Criterion:
             total_loss += self.los_fnc['coordinates'](
                 outputs['coordinates'].permute(0,2,3,1)[mask],
                 target_dict['coordinates'].permute(0,2,3,1)[mask])
+            total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
+        if 'coordinates_gs' in self.model_type:
+            mask = (target_dict['mask'] > 0.5)
+            # Reshape: (B, 3*total_bins, H, W) -> (B, 3, total_bins, H, W)
+            out = outputs['coordinates_gs']
+            total_bins = self.bc.total_bins
+            B, _, H, W = out.shape
+            out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # (B, H, W, 3, total_bins)
+            gt = target_dict['coordinates'].permute(0, 2, 3, 1)  # (B, H, W, 3)
+            valid_out = out[mask]  # (N, 3, total_bins)
+            valid_gt = gt[mask]  # (N, 3)
+            if valid_out.shape[0] > 0:
+                total_loss += self.bc.loss_js(valid_out, valid_gt)
             total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         return total_loss
 
@@ -393,9 +412,11 @@ def main():
         device = torch.device(f'cuda:{gpu_ids[0]}' if torch.cuda.is_available() else 'cpu')
     # device = torch.device('cpu')
     # 构建模型
-    model = build_model(config)
+    model, bc = build_model(config)
 
     model.to(device)
+    if bc is not None:
+        bc.to(device)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                      find_unused_parameters=False)
@@ -406,7 +427,8 @@ def main():
         print(f"Using DataParallel on GPUs: {args.gpu}")
 
     if args.mode != 'train' or args.resume is True:
-        checkpoint = torch.load('./workingdir/2225f8b6-d0b4-45d1-8247-f7d6c1635f5a/model_final.pth')
+        if torch.cuda.device_count() == 1:
+            checkpoint = torch.load('./workingdir/gpu1_coords_b16_lr2e4/model_final.pth', map_location='cuda:0')
         model.load_state_dict(checkpoint, strict=True)
 
     # 构建数据集（根据模式选择split）
@@ -434,10 +456,10 @@ def main():
 
     elif args.mode == 'sunlamp':
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
-        # vis_dataset = build_dataset(config, 'sunlamp')
-        # vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
-        vis_dataset = build_dataset(config, 'validation')
+        vis_dataset = build_dataset(config, 'sunlamp')
         vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+        # vis_dataset = build_dataset(config, 'validation')
+        # vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
     elif args.mode == 'lightbox':
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
         vis_dataset = build_dataset(config, 'lightbox')
@@ -452,7 +474,7 @@ def main():
         valid_losses=[]
         train_losses=[]
 
-        criterion = Criterion(model_type=config['MODEL']['TYPE'])
+        criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc)
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
         epochs = config['TRAIN']['MAX_EPOCH']
@@ -485,14 +507,14 @@ def main():
             with open(end_path_name+'/train_info.json', 'w', encoding='utf-8') as f:
                 json.dump(SAVE_DATA, f)
             print('testing on sunlamp...')
-            result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+            result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
             for name, data in result_dict.items():
                 file_path = f"{end_path_name}/sunlamp_result_{name}.json"
                 with open(file_path, 'w') as f:
                     json.dump(data, f)
 
             print('testing on lightbox...')
-            result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device)
+            result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
             for name, data in result_dict.items():
                 file_path = f"{end_path_name}/lightbox_result_{name}.json"
                 with open(file_path, 'w') as f:

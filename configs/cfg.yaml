@@ -6,6 +6,12 @@ MODEL:
   DECODE_HEAD: "SegformerHead" #BNHead
   OUTPUT_CHANNELS: 11
   ACTIVATE: 'None' # None, sigmoid, softmax...
+  # bin converter for coordinates_gs
+  BIN_CONVERTER:
+    SAMPLE_RANGE: [-0.7, 0.7]
+    N_PER_UNIT: 30
+    SIGMA_FACTOR: 1.5
+    LOSS_TYPE: 'js'  # js, ce
 
 TRAIN:
   LR: 5e-4
