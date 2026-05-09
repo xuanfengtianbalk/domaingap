@@ -170,13 +170,15 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
                 out = outputs['coordinates_gs'].detach()
                 B, _, H, W = out.shape
                 total_bins = bc.total_bins
-                out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # (B,H,W,3,bins)
-                out = F.softmax(out, dim=-1)  # logits → probs
-                coormap_value = bc.bins_to_value(out)  # (B,H,W,3)
-                coormap_value = coormap_value.permute(0, 3, 1, 2)  # (B,3,H,W)
-                mask_bool_est_ = activate(outputs['mask']) > 0.5
-                mask_bool_est = mask_bool_est_.expand_as(coormap_value).cpu()
-                coormap_value[~mask_bool_est] = float('nan')
+                out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # (B, H, W, 3, T)
+                probs = F.softmax(out, dim=-1)
+                coormap_np = bc.bins_to_value(probs)  # numpy (B, H, W, 3)
+                coormap_value = torch.from_numpy(np.transpose(coormap_np, (0, 3, 1, 2))).float().to(device)  # (B, 3, H, W)
+                if bc.use_mask and 'mask' in outputs:
+                    mask_bool_est_ = activate(outputs['mask']) > 0.5
+                    mask_bool_est = mask_bool_est_.expand_as(coormap_value).cpu()
+                    coormap_value[~mask_bool_est] = float('nan')
+                # else: mask already embedded via bins_to_value (NaN for bg)
                 print('test of coordinates_gs')
                 is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, coormap_value.squeeze().permute(2,1,0).cpu().numpy(), gtbbox.cpu().numpy())
                 err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(

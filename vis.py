@@ -64,7 +64,7 @@ def visualize_image_list(
         plt.savefig(save_path, bbox_inches='tight')
         print(f"可视化已保存至: {save_path}")
     if show:
-        plt.show()
+        pass  # plt.show()
     else:
         plt.close(fig)
 
@@ -75,8 +75,9 @@ def eval_one_epoch_visualization(
     dataloader,
     model_type: List[str],
     device: torch.device,
-    num_samples: int = 10,          # 最多可视化多少张图（避免过多）
-    max_batches: Optional[int] = None,  # 限制处理多少 batch
+    num_samples: int = 10,
+    max_batches: Optional[int] = None,
+    bc = None,  # BinConverter for coordinates_gs
 ) -> List[np.ndarray]:
     """
     仅进行前向推理，收集原图、标签和网络输出，生成可视化图像列表。
@@ -136,7 +137,7 @@ def eval_one_epoch_visualization(
                 imageshapes_list.append(imageshape)
 
             # 前向推理
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 # 将裁剪后的图像 resize 到 256x256（与原代码一致）
                 inputs = torch.stack([
                     torch.nn.functional.interpolate(img_.unsqueeze(0), size=(256, 256), mode='bilinear', align_corners=False).squeeze(0)
@@ -165,7 +166,7 @@ def eval_one_epoch_visualization(
                 if 'keypoints_gs' in model_type:
                     # 预测热图 -> 关键点
                     heatmap = outputs['keypoints_gs'][b]  # (C, H, W) 或 (H, W, C)? 根据实际情况
-                    print(heatmap.shape)
+                    # print(heatmap.shape)
                     # 假设热图形状 (C, 256, 256) 或 (256,256,C)，这里需要转成关键点坐标
                     # 使用 heatmaps_to_keypoints 函数（沿用原代码中的函数）
                     pred_keypoints = heatmaps_to_keypoints(heatmap.unsqueeze(0), imageshapes_list[b])[0][0]
@@ -188,17 +189,16 @@ def eval_one_epoch_visualization(
 
                     # 将 matplotlib figure 转为 numpy array
                     fig.canvas.draw()
-                    img_arr = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                    img_arr = img_arr.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                    img_arr = np.array(fig.canvas.buffer_rgba())[:, :, :3]
                     collected_images.append(img_arr)
                     plt.close(fig)
 
                 if 'coordinates' in model_type:
                     # 坐标回归分支：预测的坐标图
                     coord_map = outputs['coordinates'][b]  # 假设形状 (C, H, W) 或 (H, W, C)
-                    print(coord_map.shape)
+                    # print(coord_map.shape)
                     mask_logits = outputs['mask'][b]       # 形状 (1, H, W) 或 (H, W)
-                    print(mask_logits.shape)
+                    # print(mask_logits.shape)
                     mask_bool = activate(mask_logits) > 0.5
 
                     # 将坐标图转为通道在最后一维的 numpy
@@ -224,13 +224,41 @@ def eval_one_epoch_visualization(
                     axes[2].imshow(mask_bool.cpu().numpy()[0], cmap='gray')
                     axes[2].set_title('Mask')
                     axes[2].axis('off')
-                    plt.show()
+                    # plt.show()
                     # plt.suptitle('Coordinates Regression')
                     # plt.tight_layout()
-                    # fig.canvas.draw()
-                    # img_arr = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
-                    # img_arr = img_arr.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-                    # collected_images.append(img_arr)
+                    fig.canvas.draw()
+                    img_arr = np.array(fig.canvas.buffer_rgba())[:, :, :3]
+                    collected_images.append(img_arr)
+                    plt.close(fig)
+
+                if 'coordinates_gs' in model_type and bc is not None:
+                    import torch.nn.functional as F
+                    out = outputs['coordinates_gs'][b]  # (3*total_bins, H, W)
+                    total_bins = bc.total_bins
+                    out = out.view(3, total_bins, 256, 256).permute(2, 3, 0, 1)  # (256, 256, 3, total_bins)
+                    probs = F.softmax(out, dim=-1)
+                    coords_np = bc.bins_to_value(probs)  # (256, 256, 3) numpy
+
+                    coords_vis = (coords_np - np.nanmin(coords_np)) / (np.nanmax(coords_np) - np.nanmin(coords_np) + 1e-8)
+
+                    if bc.use_mask and 'mask' in outputs:
+                        mask_bool = (activate(outputs['mask'][b]) > 0.5).cpu().numpy().squeeze()
+                    else:
+                        # mask derived from bins_to_value (NaN = background)
+                        mask_bool = np.all(np.isfinite(coords_np), axis=-1)
+
+                    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                    axes[0].imshow(img_resized)
+                    axes[0].set_title('Input'); axes[0].axis('off')
+                    axes[1].imshow(coords_vis)
+                    axes[1].set_title('Predicted Coords (GS bins)'); axes[1].axis('off')
+                    axes[2].imshow(mask_bool, cmap='gray')
+                    axes[2].set_title('Mask'); axes[2].axis('off')
+
+                    fig.canvas.draw()
+                    img_arr = np.array(fig.canvas.buffer_rgba())[:, :, :3]
+                    collected_images.append(img_arr)
                     plt.close(fig)
 
             if len(collected_images) >= num_samples:

@@ -4,12 +4,16 @@ Regression-to-Classification Bin Converter (Torch)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 
 class BinConverter(nn.Module):
     def __init__(self, sample_range, n_per_unit=30, max_sigma=0.25,
-                 pad_factor=4.0, sigma_factor=1.5, min_bins=5):
+                 pad_factor=4.0, sigma_factor=1.5, min_bins=5, use_mask=True,
+                 loss_reduction='mean'):
         super().__init__()
+        self.use_mask = use_mask
+        self.loss_reduction = loss_reduction
         a, b = sample_range
         self.padded_range = (a - pad_factor * max_sigma, b + pad_factor * max_sigma)
         self.plen = self.padded_range[1] - self.padded_range[0]
@@ -36,14 +40,27 @@ class BinConverter(nn.Module):
             return probs.squeeze(0)
         return probs
 
-    def bins_to_value(self, probs, threshold=1e-4, fg_threshold=0.0):
-        """probs: (..., total_bins) → (... ,)"""
-        probs = torch.where(probs < threshold, torch.zeros_like(probs), probs)
-        denom = probs.sum(dim=-1, keepdim=True) + 1e-12
+    def mask_from_probs(self, probs, threshold=0.5):
+        max_per_channel = probs.max(dim=-1).values  # (N, 3)
+        return (max_per_channel > threshold).all(dim=-1)  # (N,)
+
+    def bins_to_value(self, probs, threshold=1e-4, fg_threshold=0.2, background_val=None):
+        probs = np.asarray(probs.detach().cpu())
+        probs = np.where(probs < threshold, 0.0, probs)
+        axis = -1
+        denom = probs.sum(axis=axis, keepdims=True)
+        denom = np.where(denom < 1e-12, 1.0, denom)
         probs = probs / denom
-        value = (probs * self.bin_centers).sum(dim=-1)
-        max_prob = probs.max(dim=-1).values
-        value = torch.where(max_prob < fg_threshold, torch.tensor(float('nan'), device=value.device), value)
+        value = np.sum(probs * self.bin_centers.cpu().numpy(), axis=axis)
+        max_prob = probs.max(axis=axis)
+        if background_val is None:
+            background_val = float('nan')
+        if np.ndim(max_prob) == 0:
+            value = background_val if max_prob < fg_threshold else value
+        else:
+            value = np.where(max_prob < fg_threshold, background_val, value)
+        if np.ndim(value) == 0:
+            return float(value)
         return value
 
     def loss_js(self, pred_logits, gt_value):
@@ -52,12 +69,20 @@ class BinConverter(nn.Module):
         gt = torch.clamp(gt_probs.view(-1, T), 1e-12, 1.0)
         pred = torch.clamp(F.softmax(pred_logits.view(-1, T), dim=-1), 1e-12, 1.0)
         m = 0.5 * (gt + pred)
-        kl1 = F.kl_div(torch.log(m), gt, reduction='batchmean')
-        kl2 = F.kl_div(torch.log(m), pred, reduction='batchmean')
-        return 0.5 * (kl1 + kl2)
+        kl1 = F.kl_div(torch.log(m), gt, reduction='none').sum(dim=-1)  # per-pixel sum
+        kl2 = F.kl_div(torch.log(m), pred, reduction='none').sum(dim=-1)
+        js_per_pixel = 0.5 * (kl1 + kl2)  # (N*3,)
+        if self.loss_reduction == 'mean':
+            return js_per_pixel.mean()
+        else:  # 'sum': per-pixel sum then avg (like dsntnn)
+            return js_per_pixel.sum() / gt_probs.shape[0]  # divide by N
 
     def loss_ce(self, pred_logits, gt_value):
         gt_probs = self.value_to_bins(gt_value)
         T = gt_probs.shape[-1]
         gt = torch.clamp(gt_probs.view(-1, T), 1e-12, 1.0)
-        return F.kl_div(F.log_softmax(pred_logits.view(-1, T), dim=-1), gt, reduction='batchmean')
+        ce_per_pixel = F.kl_div(F.log_softmax(pred_logits.view(-1, T), dim=-1), gt, reduction='none').sum(dim=-1)
+        if self.loss_reduction == 'mean':
+            return ce_per_pixel.mean()
+        else:
+            return ce_per_pixel.sum() / gt_probs.shape[0]  # divide by N

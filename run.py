@@ -136,6 +136,8 @@ def build_model(config):
             sample_range=bc_cfg.get('SAMPLE_RANGE', [-0.5, 0.5]),
             n_per_unit=bc_cfg.get('N_PER_UNIT', 30),
             sigma_factor=bc_cfg.get('SIGMA_FACTOR', 1.5),
+            use_mask=bc_cfg.get('USE_MASK', True),
+            loss_reduction=bc_cfg.get('LOSS_REDUCTION', 'mean'),
         )
         # 3 channels (x,y,z) per keypoint × bin count
         output_channel = 3 * bc.total_bins
@@ -355,17 +357,22 @@ class Criterion:
             total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         if 'coordinates_gs' in self.model_type:
             mask = (target_dict['mask'] > 0.5)
-            # Reshape: (B, 3*total_bins, H, W) -> (B, 3, total_bins, H, W)
             out = outputs['coordinates_gs']
             total_bins = self.bc.total_bins
             B, _, H, W = out.shape
-            out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # (B, H, W, 3, total_bins)
-            gt = target_dict['coordinates'].permute(0, 2, 3, 1)  # (B, H, W, 3)
-            valid_out = out[mask]  # (N, 3, total_bins)
-            valid_gt = gt[mask]  # (N, 3)
+            out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)
+            gt = target_dict['coordinates'].permute(0, 2, 3, 1)
+            valid_out = out[mask]
+            valid_gt = gt[mask]
             if valid_out.shape[0] > 0:
                 total_loss += self.bc.loss_js(valid_out, valid_gt)
-            total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
+            invalid_out = out[~mask]
+            if invalid_out.shape[0] > 0:
+                probs = invalid_out.softmax(dim=-1)
+                expected = (probs * self.bc.bin_centers).sum(dim=-1)
+                total_loss += 0.1 * (expected ** 2).mean()
+            if self.bc.use_mask:
+                total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
         return total_loss
 
     # 也可以直接使用 __call__ 让实例像函数一样调用
@@ -428,7 +435,7 @@ def main():
 
     if args.mode != 'train' or args.resume is True:
         if torch.cuda.device_count() == 1:
-            checkpoint = torch.load('./workingdir/gpu1_coords_b16_lr2e4/model_final.pth', map_location='cuda:0')
+            checkpoint = torch.load('./workingdir/9a5d94ee-a6eb-41bf-9ef4-a6f02fbcc589/model_final.pth', map_location='cuda:0')
         model.load_state_dict(checkpoint, strict=True)
 
     # 构建数据集（根据模式选择split）
@@ -506,6 +513,8 @@ def main():
             # 写入JSON文件
             with open(end_path_name+'/train_info.json', 'w', encoding='utf-8') as f:
                 json.dump(SAVE_DATA, f)
+            torch.save(model.state_dict(), end_path_name+'/model_final.pth')
+
             print('testing on sunlamp...')
             result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
             for name, data in result_dict.items():
@@ -519,7 +528,7 @@ def main():
                 file_path = f"{end_path_name}/lightbox_result_{name}.json"
                 with open(file_path, 'w') as f:
                     json.dump(data, f)
-            torch.save(model.state_dict(), end_path_name+'/model_final.pth')
+
 
     elif args.mode == 'sunlamp' or args.mode == 'lightbox':
         # 可视化示例：显示几个预测结果
@@ -527,7 +536,12 @@ def main():
         model.eval()
         with torch.no_grad():
             from vis import eval_one_epoch_visualization
-            eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device)
+            vis_images = eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device, bc=bc)
+            import os as _os; _os.makedirs('visuals', exist_ok=True)
+            from PIL import Image as _Image
+            for i, img_arr in enumerate(vis_images):
+                _Image.fromarray(img_arr).save(f'visuals/vis_{args.mode}_{i:02d}.png')
+            print(f'Saved {len(vis_images)} images to visuals/')
 
     else:  # test
         from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss

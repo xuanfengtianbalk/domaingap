@@ -1,35 +1,37 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-def crop_tensor_image(image, bbox):
-    padded=False
+def crop_tensor_image(image, bbox, padded=False):
     xmin=bbox[0]
     ymin=bbox[1]
     xmax=bbox[2]
     ymax=bbox[3]
-    #计算需要填充的边缘
-    pad_left = max(0, -xmin)
-    pad_top = max(0, -ymin)
-    pad_right = max(0, xmax - image.shape[1])
-    pad_bottom = max(0, ymax - image.shape[2])
 
-    if pad_left or pad_top or pad_right or pad_bottom:
-        padded=True
-        padding = [int(_) for _ in [pad_top, pad_bottom, pad_left, pad_right ]]
-
-        image = F.pad(image, padding, value=0)
-    #调整bbox坐标
-    xmin = int(torch.clamp(xmin, 0, image.shape[1] - 1))
-    ymin = int(torch.clamp(ymin, 0, image.shape[2] - 1))
-    if pad_top:
-        ymax = int(torch.clamp(ymax + pad_top, 0, image.shape[2]))
-    else:
-        ymax = int(torch.clamp(ymax, 0, image.shape[2]))
-    if pad_right:
-        xmax = int(torch.clamp(xmax + pad_right, 0, image.shape[1]))
-    else:
+    if not padded:
+        # clip bbox to image boundaries, no padding
+        xmin = int(torch.clamp(xmin, 0, image.shape[1]))
+        ymin = int(torch.clamp(ymin, 0, image.shape[2]))
         xmax = int(torch.clamp(xmax, 0, image.shape[1]))
-
+        ymax = int(torch.clamp(ymax, 0, image.shape[2]))
+    else:
+        # pad if bbox exceeds image
+        pad_left = max(0, -xmin)
+        pad_top = max(0, -ymin)
+        pad_right = max(0, xmax - image.shape[1])
+        pad_bottom = max(0, ymax - image.shape[2])
+        if pad_left or pad_top or pad_right or pad_bottom:
+            padding = [int(_) for _ in [pad_top, pad_bottom, pad_left, pad_right]]
+            image = F.pad(image, padding, value=0)
+        xmin = int(torch.clamp(xmin, 0, image.shape[1] - 1))
+        ymin = int(torch.clamp(ymin, 0, image.shape[2] - 1))
+        if pad_top:
+            ymax = int(torch.clamp(ymax + pad_top, 0, image.shape[2]))
+        else:
+            ymax = int(torch.clamp(ymax, 0, image.shape[2]))
+        if pad_right:
+            xmax = int(torch.clamp(xmax + pad_right, 0, image.shape[1]))
+        else:
+            xmax = int(torch.clamp(xmax, 0, image.shape[1]))
 
     croped_image=image[:,xmin:xmax,ymin:ymax]
     return croped_image
