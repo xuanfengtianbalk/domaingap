@@ -383,8 +383,8 @@ class Criterion:
 def parse_args():
     """示例参数解析器，使用 parse_known_args 捕获未知参数用于覆盖配置。"""
     parser = argparse.ArgumentParser(description="Run training/visualization/testing based on config.")
-    parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox'],
-                        help='Task to execute: train, visualization, or test')
+    parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox', 'evaluate'],
+                        help='Task to execute: train, visualization, sunlamp, lightbox, or evaluate')
     parser.add_argument('--config', type=str, default='configs/cfg.yaml',
                         help='Path to configuration file (YAML)')
     parser.add_argument('--resume', action='store_true', help='resume training')
@@ -394,6 +394,8 @@ def parse_args():
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
+    parser.add_argument('--resume_path', type=str, default='',
+                        help='Workingdir UUID path for evaluate mode')
     # 使用 parse_known_args 以接受额外参数
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -433,12 +435,17 @@ def main():
         model = torch.nn.DataParallel(model, device_ids=args.gpu)
         print(f"Using DataParallel on GPUs: {args.gpu}")
 
-    if args.mode != 'train' or args.resume is True:
-        if torch.cuda.device_count() == 1:
-            checkpoint = torch.load('./workingdir/9a5d94ee-a6eb-41bf-9ef4-a6f02fbcc589/model_final.pth', map_location='cuda:0')
+    if args.mode == 'evaluate':
+        checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location=device)
+        model.load_state_dict(checkpoint, strict=True)
+        end_path_name = f'workingdir/{args.resume_path}'
+    elif args.mode != 'train' or args.resume is True:
+        if args.resume_path:
+            checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location='cuda:0')
+        else:
+            checkpoint = torch.load('./workingdir/c04d815b-814e-47e5-bcba-8519be4c92dc/model_final.pth', map_location='cuda:0')
         model.load_state_dict(checkpoint, strict=True)
 
-    # 构建数据集（根据模式选择split）
     if args.mode == 'train':
         train_dataset = build_dataset(config, 'train')
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
@@ -471,6 +478,8 @@ def main():
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
         vis_dataset = build_dataset(config, 'lightbox')
         vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+    elif args.mode == 'evaluate':
+        pass  # dataset built inside evaluate handler
     else:  # test
         test_dataset = build_dataset(config, args.mode)
         test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
@@ -530,6 +539,18 @@ def main():
                     json.dump(data, f)
 
 
+    elif args.mode == 'evaluate':
+        from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
+        for mode in ['lightbox', 'sunlamp']:
+            dataset = build_dataset(config, mode)
+            loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
+            criterion = KeypointRCNNLoss(sigma=3)
+            result_dict = eval_one_epoch(model, loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            for name, data in result_dict.items():
+                with open(f'{end_path_name}/{mode}_result_{name}.json', 'w') as f:
+                    json.dump(data, f)
+            print(f'{mode} eval saved to {end_path_name}/')
+
     elif args.mode == 'sunlamp' or args.mode == 'lightbox':
         # 可视化示例：显示几个预测结果
         import matplotlib.pyplot as plt
@@ -538,10 +559,12 @@ def main():
             from vis import eval_one_epoch_visualization
             vis_images = eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device, bc=bc)
             import os as _os; _os.makedirs('visuals', exist_ok=True)
+            save_dir = f'visuals/{args.resume_path}'
+            _os.makedirs(save_dir, exist_ok=True)
             from PIL import Image as _Image
             for i, img_arr in enumerate(vis_images):
-                _Image.fromarray(img_arr).save(f'visuals/vis_{args.mode}_{i:02d}.png')
-            print(f'Saved {len(vis_images)} images to visuals/')
+                _Image.fromarray(img_arr).save(f'{save_dir}/vis_{args.mode}_{i:02d}.png')
+            print(f'Saved {len(vis_images)} images to {save_dir}/')
 
     else:  # test
         from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss

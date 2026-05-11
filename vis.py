@@ -239,7 +239,7 @@ def eval_one_epoch_visualization(
                     out = out.view(3, total_bins, 256, 256).permute(2, 3, 0, 1)  # (256, 256, 3, total_bins)
                     probs = F.softmax(out, dim=-1)
                     coords_np = bc.bins_to_value(probs)  # (256, 256, 3) numpy
-
+                    # print(coords_np.shape)
                     coords_vis = (coords_np - np.nanmin(coords_np)) / (np.nanmax(coords_np) - np.nanmin(coords_np) + 1e-8)
 
                     if bc.use_mask and 'mask' in outputs:
@@ -251,7 +251,7 @@ def eval_one_epoch_visualization(
                     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
                     axes[0].imshow(img_resized)
                     axes[0].set_title('Input'); axes[0].axis('off')
-                    axes[1].imshow(coords_vis)
+                    axes[1].imshow(coords_np)
                     axes[1].set_title('Predicted Coords (GS bins)'); axes[1].axis('off')
                     axes[2].imshow(mask_bool, cmap='gray')
                     axes[2].set_title('Mask'); axes[2].axis('off')

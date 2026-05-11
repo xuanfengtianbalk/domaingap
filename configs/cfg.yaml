@@ -13,7 +13,7 @@ MODEL:
     SIGMA_FACTOR: 1.5
     LOSS_TYPE: 'js'  # js, ce
     LOSS_REDUCTION: 'mean'  # mean (per-pixel avg) or sum (per-pixel sum then avg)
-    USE_MASK: true   # use mask head for coordinates_gs
+    USE_MASK: False   # use mask head for coordinates_gs
 
 TRAIN:
   LR: 5e-4

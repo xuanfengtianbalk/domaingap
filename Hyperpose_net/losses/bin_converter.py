@@ -75,7 +75,7 @@ class BinConverter(nn.Module):
 
 
         sigma=self.compute_sigma(probs)
-        print(sigma)
+        # print(sigma)
         value = np.where((sigma > fg_threshold), background_val, value)
         return value
 
