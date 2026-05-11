@@ -44,23 +44,39 @@ class BinConverter(nn.Module):
         max_per_channel = probs.max(dim=-1).values  # (N, 3)
         return (max_per_channel > threshold).all(dim=-1)  # (N,)
 
-    def bins_to_value(self, probs, threshold=1e-4, fg_threshold=0.2, background_val=None):
+    def compute_sigma(self, probs):
+        """
+        probs: (H, W, C) 概率数组，每个通道和为 1
+        返回: sigma (H, W)
+        """
+        C = probs.shape[-1]
+        # 类别索引作为取值
+        indices = np.arange(C)  # shape (C,)
+        # 期望 mu: (H, W)
+        mu = np.sum(probs * indices, axis=-1)
+        # 方差: sum(p * (i - mu)^2)
+        variance = np.sum(probs * (indices - mu[..., None]) ** 2, axis=-1)
+        sigma = np.sqrt(variance)
+        return sigma
+    def bins_to_value(self, probs, threshold=1e-4, fg_threshold= 10):
         probs = np.asarray(probs.detach().cpu())
-        probs = np.where(probs < threshold, 0.0, probs)
+
         axis = -1
+
         denom = probs.sum(axis=axis, keepdims=True)
-        denom = np.where(denom < 1e-12, 1.0, denom)
+        denom = np.where(denom < threshold, 1.0, denom)
         probs = probs / denom
         value = np.sum(probs * self.bin_centers.cpu().numpy(), axis=axis)
-        max_prob = probs.max(axis=axis)
-        if background_val is None:
-            background_val = float('nan')
-        if np.ndim(max_prob) == 0:
-            value = background_val if max_prob < fg_threshold else value
-        else:
-            value = np.where(max_prob < fg_threshold, background_val, value)
-        if np.ndim(value) == 0:
-            return float(value)
+
+        background_val = float('nan')
+
+        max_per_channel = probs.max(axis=-1)
+
+
+
+        sigma=self.compute_sigma(probs)
+        print(sigma)
+        value = np.where((sigma > fg_threshold), background_val, value)
         return value
 
     def loss_js(self, pred_logits, gt_value):
