@@ -136,6 +136,8 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
 
             if 'coordinates' in model_type:
                 coormap_masked = outputs['coordinates'].clone()
+                if hasattr(criterion, 'los_fnc') and hasattr(criterion.los_fnc.get('coordinates', None), 'post_process'):
+                    coormap_masked = criterion.los_fnc['coordinates'].post_process(coormap_masked)
                 mask_bool_est_ = activate(outputs['mask']) > 0.5
                 mask_bool_est = mask_bool_est_.expand_as(coormap_masked).cpu()
                 coormap_masked[~mask_bool_est] = float('nan')

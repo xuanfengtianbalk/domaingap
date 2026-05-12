@@ -27,10 +27,18 @@ class FocalLoss(nn.Module):
             return loss
 
 class CoorsLoss(nn.Module):
-    def __init__(self):
+    """Coordinate loss with normalization to [-1, 1]"""
+    def __init__(self, scale_x=0.575, scale_y=0.565, scale_z=0.225):
         super().__init__()
+        self.register_buffer('scale', torch.tensor([scale_x, scale_y, scale_z]))
         self.criterion = torch.nn.L1Loss()
 
     def forward(self, output, target):
-        loss = self.criterion(output, target)
-        return loss
+        """Normalize target before computing loss"""
+        target = target / self.scale.to(target.device)
+        return self.criterion(output, target)
+
+    @torch.no_grad()
+    def post_process(self, output):
+        """Denormalize output back to real-world coordinates"""
+        return output * self.scale.to(output.device)

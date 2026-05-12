@@ -56,27 +56,27 @@ def build_dataset(config, split):
 
             T = [
                 A.Resize(height=300, width=480, p=1),
-                A.RandomBrightnessContrast(p=1),
-                # A.HorizontalFlip(p=0.5),
-                # A.VerticalFlip(p=0.5),
-                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
-                                   border_mode=cv2.BORDER_CONSTANT,
-                                   fill=0),
-                # BORDER_REFLECT,
-                # A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1, border_mode=cv2.BORDER_CONSTANT,
-                #                    value=0),
-
-                A.OneOf([
-                    # A.IAAAdditiveGaussianNoise(),
-                    A.GaussNoise(),
-                ], p=0.5),
-                A.OneOf([
-                    A.MotionBlur(p=0.5),
-                    A.MedianBlur(blur_limit=3, p=0.5),
-                    A.Blur(blur_limit=3, p=0.5),
-                ], p=1),
-                A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400, num_flare_circles_range=(1, 2),
-                                 p=config['TRAIN']['P_AUG_SUN']),
+                # A.RandomBrightnessContrast(p=1),
+                # # A.HorizontalFlip(p=0.5),
+                # # A.VerticalFlip(p=0.5),
+                # A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+                #                    border_mode=cv2.BORDER_CONSTANT,
+                #                    fill=0),
+                # # BORDER_REFLECT,
+                # # A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1, border_mode=cv2.BORDER_CONSTANT,
+                # #                    value=0),
+                #
+                # A.OneOf([
+                #     # A.IAAAdditiveGaussianNoise(),
+                #     A.GaussNoise(),
+                # ], p=0.5),
+                # A.OneOf([
+                #     A.MotionBlur(p=0.5),
+                #     A.MedianBlur(blur_limit=3, p=0.5),
+                #     A.Blur(blur_limit=3, p=0.5),
+                # ], p=1),
+                # A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400, num_flare_circles_range=(1, 2),
+                #                  p=config['TRAIN']['P_AUG_SUN']),
                 A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
             ]  # transforms
             trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
