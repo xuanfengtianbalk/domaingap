@@ -22,6 +22,12 @@ TRAIN:
   SAVE_DIR: 'workingdir'
   BATCH_SIZE: 16
   P_AUG_SUN: 0.0
+  AUG_TYPE: 'none'          # aug1-4, aug5, augmix, styleaug
+  STYLEAUG_P: 0.5           # probability of applying StyleAugmentor
+  STYLEAUG_ALPHA: 0.3       # style mixing strength
+  MIXSTYLE: false  # MixStyle domain generalization (default off)
+  MIXSTYLE_P: 0.5
+  MIXSTYLE_ALPHA: 0.1
 
 TEST:
   SAVE_DIR: 'test'

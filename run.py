@@ -32,7 +32,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def build_dataset(config, split):
+def build_dataset(config, split, aug_type='none'):
     """根据配置构建数据集，split可以是'train'/'val'/'test'"""
     dataset_config = config['DATASET']
     transform_list = []
@@ -50,42 +50,22 @@ def build_dataset(config, split):
     if dataset_config['NAME'] == 'speedplus':
         import albumentations as A
         if split == 'train':
-
-            # from styleaug import StyleAugmentor
-            # ex_aug = StyleAugmentor()
-
-            T = [
-                A.Resize(height=300, width=480, p=1),
-                # A.RandomBrightnessContrast(p=1),
-                # # A.HorizontalFlip(p=0.5),
-                # # A.VerticalFlip(p=0.5),
-                # A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
-                #                    border_mode=cv2.BORDER_CONSTANT,
-                #                    fill=0),
-                # # BORDER_REFLECT,
-                # # A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1, border_mode=cv2.BORDER_CONSTANT,
-                # #                    value=0),
-                #
-                # A.OneOf([
-                #     # A.IAAAdditiveGaussianNoise(),
-                #     A.GaussNoise(),
-                # ], p=0.5),
-                # A.OneOf([
-                #     A.MotionBlur(p=0.5),
-                #     A.MedianBlur(blur_limit=3, p=0.5),
-                #     A.Blur(blur_limit=3, p=0.5),
-                # ], p=1),
-                # A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400, num_flare_circles_range=(1, 2),
-                #                  p=config['TRAIN']['P_AUG_SUN']),
-                A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
-            ]  # transforms
-            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
-                                                                  remove_invisible=False),
-                              additional_targets={
-                                  'mask': 'mask',  # 将 'mask' 映射到默认的 mask 处理
-                                  'coors': 'mask'  # 将 'coors' 也按照 mask 的规则处理
-                              }
-                              )
+            if aug_type != 'none':
+                from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
+                trans = SpaceAugTransform(aug_type,
+                    styleaug_p=config['TRAIN'].get('STYLEAUG_P', 0.5),
+                    styleaug_alpha=config['TRAIN'].get('STYLEAUG_ALPHA', 0.3))
+            else:
+                T = [
+                    A.Resize(height=300, width=480, p=1),
+                    A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+                ]
+                trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
+                                                                      remove_invisible=False),
+                                  additional_targets={
+                                      'mask': 'mask',
+                                      'coors': 'mask'
+                                  })
         elif split == 'validation':
             T = [
                 A.Resize(height=300, width=480, p=1),
@@ -394,6 +374,8 @@ def parse_args():
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
+    parser.add_argument('--aug_type', type=str, default='none',
+                        help='Space augmentation: aug1-aug4, aug5, augmix, styleaug, none')
     parser.add_argument('--resume_path', type=str, default='',
                         help='Workingdir UUID path for evaluate mode')
     # 使用 parse_known_args 以接受额外参数
@@ -411,6 +393,9 @@ def main():
     if args.model_type is not None:
         config['MODEL']['TYPE'] = args.model_type
     config['MODEL']['TRAIN_BACKBONE'] = args.train_backbone
+    config['MODEL']['MIXSTYLE'] = config['TRAIN'].get('MIXSTYLE', False)
+    config['MODEL']['MIXSTYLE_P'] = config['TRAIN'].get('MIXSTYLE_P', 0.5)
+    config['MODEL']['MIXSTYLE_ALPHA'] = config['TRAIN'].get('MIXSTYLE_ALPHA', 0.1)
     config = update_config_from_args(config, unknown)
     set_seed(42 + rank)
 
@@ -447,7 +432,7 @@ def main():
         model.load_state_dict(checkpoint, strict=True)
 
     if args.mode == 'train':
-        train_dataset = build_dataset(config, 'train')
+        train_dataset = build_dataset(config, 'train', aug_type=args.aug_type)
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
                                            shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],

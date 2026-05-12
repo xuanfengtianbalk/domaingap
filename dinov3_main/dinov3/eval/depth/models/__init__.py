@@ -271,6 +271,9 @@ def build_depther(
     output_channel = 11,
     activate=None,
     train_backbone: bool = False,
+    mixstyle: bool = False,
+    mixstyle_p: float = 0.5,
+    mixstyle_alpha: float = 0.1,
     **kwargs,
 ):
     # 处理 Decode_Type：统一转换为列表，便于统一处理
@@ -285,6 +288,9 @@ def build_depther(
         use_backbone_norm=use_backbone_norm,
         adapt_to_patch_size=adapt_to_patch_size,
         train_backbone=train_backbone,
+        mixstyle=mixstyle,
+        mixstyle_p=mixstyle_p,
+        mixstyle_alpha=mixstyle_alpha,
     )
 
     # decoder = make_head(

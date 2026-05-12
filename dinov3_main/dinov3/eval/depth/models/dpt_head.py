@@ -95,7 +95,7 @@ class ConvModule(nn.Module):
         bias="auto",
         conv_cfg=None,
         norm_cfg=None,
-        act_cfg=dict(type="ReLU"),
+        act_cfg=dict(type="GELU"),
         inplace=True,
         with_spectral_norm=False,
         padding_mode="zeros",
@@ -305,7 +305,7 @@ class ReassembleBlocks(nn.Module):
                     in_channels=in_channels[channel_index],
                     out_channels=out_channel,
                     kernel_size=1,
-                    act_cfg=None,
+                    # act_cfg="GELU",
                 )
                 for channel_index, out_channel in enumerate(out_channels)
             ]

@@ -68,6 +68,9 @@ class DinoVisionTransformerWrapper(nn.Module):
         use_backbone_norm: bool = False,
         adapt_to_patch_size: PatchSizeAdaptationStrategy = PatchSizeAdaptationStrategy.CENTER_PADDING,
         train_backbone: bool = False,
+        mixstyle: bool = False,
+        mixstyle_p: float = 0.5,
+        mixstyle_alpha: float = 0.1,
     ):
         super().__init__()
 
@@ -104,6 +107,11 @@ class DinoVisionTransformerWrapper(nn.Module):
         # print(freeze_backbone)
         self.backbone.requires_grad_(train_backbone)
 
+        # MixStyle
+        self.mixstyle = mixstyle
+        self.mixstyle_p = mixstyle_p
+        self.mixstyle_alpha = mixstyle_alpha
+
     def forward(
         self,
         x: Tensor,  # [B, rgb, H, W]
@@ -116,4 +124,20 @@ class DinoVisionTransformerWrapper(nn.Module):
             return_class_token=True,
             norm=self.final_norm,
         )  # List of (patch feats [B, C, h, w], class token [B, C])
+
+        if self.mixstyle and self.training:
+            import numpy as np
+            p, alpha = self.mixstyle_p, self.mixstyle_alpha
+            mixed = []
+            for feat, cls_token in outputs:
+                if np.random.rand() < p:
+                    B = feat.size(0)
+                    mu = feat.mean(dim=[2,3], keepdim=True)
+                    sig = (feat.var(dim=[2,3], keepdim=True) + 1e-6).sqrt()
+                    idx = torch.randperm(B, device=feat.device)
+                    mu2, sig2 = mu[idx], sig[idx]
+                    feat = (feat - mu) / sig * (sig * (1-alpha) + sig2 * alpha) + (mu * (1-alpha) + mu2 * alpha)
+                mixed.append((feat, cls_token))
+            return mixed
+
         return outputs

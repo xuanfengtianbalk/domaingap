@@ -10,10 +10,11 @@ import numpy as np
 class BinConverter(nn.Module):
     def __init__(self, sample_range, n_per_unit=30, max_sigma=0.25,
                  pad_factor=4.0, sigma_factor=1.5, min_bins=5, use_mask=True,
-                 loss_reduction='mean'):
+                 loss_reduction='mean', fg_threshold=5):
         super().__init__()
         self.use_mask = use_mask
         self.loss_reduction = loss_reduction
+        self.fg_threshold = fg_threshold
         a, b = sample_range
         self.padded_range = (a - pad_factor * max_sigma, b + pad_factor * max_sigma)
         self.plen = self.padded_range[1] - self.padded_range[0]
@@ -58,7 +59,7 @@ class BinConverter(nn.Module):
         variance = np.sum(probs * (indices - mu[..., None]) ** 2, axis=-1)
         sigma = np.sqrt(variance)
         return sigma
-    def bins_to_value(self, probs, threshold=1e-4, fg_threshold= 10):
+    def bins_to_value(self, probs, threshold=1e-4, fg_threshold= None):
         probs = np.asarray(probs.detach().cpu())
 
         axis = -1
@@ -75,7 +76,8 @@ class BinConverter(nn.Module):
 
 
         sigma=self.compute_sigma(probs)
-        # print(sigma)
+        if fg_threshold is None:
+            fg_threshold = self.fg_threshold
         value = np.where((sigma > fg_threshold), background_val, value)
         return value
 
