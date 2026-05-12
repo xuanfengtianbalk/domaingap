@@ -41,4 +41,7 @@ class CoorsLoss(nn.Module):
     @torch.no_grad()
     def post_process(self, output):
         """Denormalize output back to real-world coordinates"""
-        return output * self.scale.to(output.device)
+        s = self.scale.to(output.device)
+        if output.dim() == 4:
+            s = s.view(1, 3, 1, 1)
+        return output * s
