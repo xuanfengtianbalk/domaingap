@@ -57,7 +57,6 @@ def build_dataset(config, split, aug_type='none'):
                     styleaug_alpha=config['TRAIN'].get('STYLEAUG_ALPHA', 0.3))
             else:
                 T = [
-                    A.Resize(height=300, width=480, p=1),
                     A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
                 ]
                 trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
@@ -68,8 +67,6 @@ def build_dataset(config, split, aug_type='none'):
                                   })
         elif split == 'validation':
             T = [
-                A.Resize(height=300, width=480, p=1),
-                # ToTensorV2(p=1),
                 A.Normalize(mean=IMAGENET_DEFAULT_MEAN,std=IMAGENET_DEFAULT_STD)
             ]  # transforms
             trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',

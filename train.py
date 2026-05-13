@@ -1,5 +1,4 @@
 import torch
-from utils_datasets.speedplus_utils_main.my_augmentation import crop_tensor_image
 from tqdm import tqdm
 def train_one_epoch(model, dataloader, model_type, criterion, optimizer, scheduler, device):
     model.train()
@@ -17,17 +16,17 @@ def train_one_epoch(model, dataloader, model_type, criterion, optimizer, schedul
         target_dict = {}
         for img, target in zip(samples, target_list):
             gtbbox = torch.round(target["boxes"].squeeze(0))
-            org_imgs_list.append(crop_tensor_image(img, gtbbox).to(device))
+            org_imgs_list.append(img.to(device))
             if 'coordinates' in model_type or 'coordinates_gs' in model_type:
-                coors_gt_list.append(crop_tensor_image(target["coors_gt"], gtbbox).to(device))
-                mask_gt_list.append(crop_tensor_image(target["mask_gt"].float().unsqueeze(0), gtbbox).squeeze(0).to(device))
+                coors_gt_list.append(target["coors_gt"].float().to(device))
+                mask_gt_list.append(target["mask_gt"].float().to(device))
             if 'keypoints_gs' in model_type:
-                gt_target.append(target['keypoints'] - torch.tensor([gtbbox[0], gtbbox[1], 0], device=device))
+                gt_target.append(target['keypoints'])
             imageshapes.append(torch.tensor([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]]))
-        inputs = torch.stack([torch.nn.functional.interpolate(img_.unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0) for img_ in org_imgs_list])
+        inputs = torch.stack(org_imgs_list)
         if 'coordinates' in model_type or 'coordinates_gs' in model_type:
-            coors_gt = torch.stack([torch.nn.functional.interpolate(c_.unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0) for c_ in coors_gt_list])
-            mask_gt = torch.stack([torch.nn.functional.interpolate(m_.unsqueeze(0).unsqueeze(0), size=(256, 256), mode='nearest').squeeze(0).squeeze(0) for m_ in mask_gt_list])
+            coors_gt = torch.stack(coors_gt_list)
+            mask_gt = torch.stack(mask_gt_list)
             target_dict['coordinates'] = coors_gt
             target_dict['mask'] = mask_gt
         if 'keypoints_gs' in model_type:

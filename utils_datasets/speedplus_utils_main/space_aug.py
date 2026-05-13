@@ -36,12 +36,12 @@ class SpaceAugTransform:
         """Build the albumentations part of the pipeline."""
         t = self.aug_type
         if t in ('none', 'styleaug'):
-            return A.Compose([A.Resize(height=300, width=480, p=1)],
+            return A.Compose([],
                              keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                              additional_targets={'mask': 'mask', 'coors': 'mask'})
 
         # Incremental aug levels
-        augs = [A.Resize(height=300, width=480, p=1)]
+        augs = []
         base_augs = [
             A.OneOf([A.GaussianBlur((3,7),p=1), A.MotionBlur((3,7),p=1)], p=0.5),
             A.Sharpen(p=0.5), A.Emboss(p=0.5),
@@ -91,8 +91,7 @@ class SpaceAugTransform:
         g_general = A.Compose([
             A.SomeOf([A.CoarseDropout(num_holes_range=(1,8),p=1),A.PixelDropout(0.02,p=1),
                        A.Superpixels(p_replace=0.1,n_segments=100,p=1)],n=2,p=1)],p=1)
-        return A.Compose([A.Resize(height=300,width=480,p=1),
-                          g_brightness,g_blur,g_corrupt,g_general],
+        return A.Compose([g_brightness,g_blur,g_corrupt,g_general],
                          keypoint_params=A.KeypointParams(format='xy',remove_invisible=False),
                          additional_targets={'mask':'mask','coors':'mask'})
 

@@ -64,7 +64,7 @@ def compute_pose_error(qvecs, tvecs, qgt, rgt, is_true):
         err_r_abs = torch.norm(tvecs - rgt)
 
         err_r_rel = torch.norm(tvecs - rgt) / torch.norm(rgt)
-        print(err_r_rel, err_ori)
+        # print(err_r_rel, err_ori)
         if err_r_rel<2.173e-3:
             err_r_rel=torch.tensor(0)
         ###   记录计算平均值   ###

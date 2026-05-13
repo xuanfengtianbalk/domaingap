@@ -3,7 +3,6 @@ from typing import List, Union, Optional, Tuple
 
 
 import torch
-from utils_datasets.speedplus_utils_main.my_augmentation import crop_tensor_image
 from tqdm import tqdm
 
 import numpy as np
@@ -116,33 +115,20 @@ def eval_one_epoch_visualization(
             imageshapes_list = []    # 存储裁剪后的宽高
 
             for img, target in zip(samples, target_list):
-                # 获取地面真值边界框 (gtbbox)
                 gtbbox = torch.round(target["boxes"].squeeze(0)).cpu().numpy().astype(int)
                 gt_bboxes_list.append(gtbbox)
 
-                # 裁剪原图（与原代码中 crop_tensor_image 一致）
-                cropped = crop_tensor_image(img.clone(), torch.tensor(gtbbox).to(device)).float().to(device)
-                org_imgs_list.append(cropped)
+                org_imgs_list.append(img.to(device))
 
-                # 获取真实关键点并转换到裁剪图像中的坐标（相对坐标）
-                kp_global = target['keypoints'].cpu().numpy()  # (N, 3) or (N,2)
-                # 计算相对裁剪框左上角的偏移
-                kp_local = kp_global.copy()
-                kp_local[:, 0] -= gtbbox[0]
-                kp_local[:, 1] -= gtbbox[1]
-                gt_keypoints_list.append(kp_local)
+                kp_global = target['keypoints'].cpu().numpy()  # (N, 3) already in crop space
+                gt_keypoints_list.append(kp_global)
 
-                # 裁剪区域的宽高
                 imageshape = np.array([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]])
                 imageshapes_list.append(imageshape)
 
             # 前向推理
             with torch.amp.autocast('cuda'):
-                # 将裁剪后的图像 resize 到 256x256（与原代码一致）
-                inputs = torch.stack([
-                    torch.nn.functional.interpolate(img_.unsqueeze(0), size=(256, 256), mode='bilinear', align_corners=False).squeeze(0)
-                    for img_ in org_imgs_list
-                ]).to(device)
+                inputs = torch.stack(org_imgs_list).to(device)
                 outputs = model(inputs)
 
             # 对 batch 中的每一张图像生成可视化

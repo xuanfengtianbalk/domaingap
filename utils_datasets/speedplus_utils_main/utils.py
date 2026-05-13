@@ -685,68 +685,79 @@ if has_pytorch:
             sample_id = self.sample_ids[idx]
             img_name = os.path.join(self.image_root, sample_id)
 
-
-            # note: despite grayscale images, we are converting to 3 channels here,
-            # since most pre-trained networks expect 3 channel input
             pil_image = Image.open(img_name).convert('RGB')
 
-            # if self.train or self.split[-10:] == 'validation':
             if self.labels is not None:
                 q, r = self.labels[sample_id]['q'], self.labels[sample_id]['r']
                 kp, distance = self.calculate_landmarks_distance(p_axes=self.points, q=q, r=r)
-                # kpt的可见性
                 for index in range(len(kp)):
                     select_kp = distance[:-3] < distance[index]
-
                     kp_temp = [p for p, b in zip(kp, select_kp) if b == True]
                     kp_temp.append(kp[index])
                     if len(kp_temp) <= 3:
                         kp[index][2] = 1
                     else:
                         result = convex_hull(kp_temp)
-                        # 如果选择的kp[index] in result
                         for p in result:
                             if kp[index] == p:
                                 kp[index][2] = 1
 
-
-
             q, r = self.labels[sample_id]['q'], self.labels[sample_id]['r']
 
             np_image = np.array(pil_image)
+            ymax, xmax, _ = np_image.shape
             target_dict = {}
 
-            ymax, xmax, _ = np_image.shape
-            keypoints = []
+            # --- compute bbox from original keypoints (before any transform) ---
+            kp_orig = []
             for x, y, view in kp:
                 if x > 0 and y > 0 and x < xmax and y < ymax:
-                    keypoints.append([x, y, view])
+                    kp_orig.append([x, y, view])
                 else:
-                    keypoints.append([x, y, 0])
+                    kp_orig.append([x, y, 0])
+            b, padded_ratio = self.calculate_boxes_and_padded(torch.tensor(kp_orig, dtype=torch.float32))
+            target_dict["padded_ratio"] = padded_ratio
+            x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+
+            # --- crop + resize image to 256x256 ---
+            import cv2
+            cropped_img = np_image[y1:y2, x1:x2]
+            resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
+
+            # --- adjust keypoints to original crop space (relative to x1, y1) ---
+            kp_crop = []
+            for x, y, v in kp:
+                nx = x - x1
+                ny = y - y1
+                kp_crop.append([nx, ny, v])
+
+            # --- get coors/mask, crop+resize, then apply transforms ---
             if self.split == 'train' or self.split == 'validation':
                 depth_path = os.path.join(self.depth_root, sample_id[:-4] + '0001.exr')
-                coors = self.get_coors(depth_path,pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
+                coors = self.get_coors(depth_path, pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
                 mask = np.all(np.isfinite(coors), axis=0)
 
-                trans_image = self.transform(image=np_image, keypoints=keypoints,
-                                             mask=mask.astype(np.uint8),  # 对应 additional_targets 中的 'mask'
-                                             coors=np.transpose(coors, (1, 2, 0)),  # 对应 additional_targets 中的 'coors'
-                                             )
+                coors_crop = coors[:, y1:y2, x1:x2]
+                mask_crop = mask[y1:y2, x1:x2]
+                coors_resized = np.transpose(cv2.resize(
+                    np.transpose(coors_crop, (1, 2, 0)), (256, 256),
+                    interpolation=cv2.INTER_LINEAR), (2, 0, 1))
+                mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
+                                          interpolation=cv2.INTER_NEAREST)
+
+                trans_image = self.transform(image=resized_img, keypoints=kp_crop,
+                                             mask=mask_resized.astype(np.uint8),
+                                             coors=np.transpose(coors_resized, (1, 2, 0)))
                 kp = trans_image['keypoints']
-                new_mask = trans_image['mask'].T  # shape (W', H') -> H W
-                new_coors = np.transpose(trans_image['coors'], (2, 1, 0))  # shape (H', W', 3) => 3 H W
-
-                target_dict["coors_gt"]=torch.tensor(new_coors)
-
-                target_dict["mask_gt"]=torch.tensor(new_mask)
+                new_mask = trans_image['mask'].T
+                new_coors = np.transpose(trans_image['coors'], (2, 1, 0))
+                target_dict["coors_gt"] = torch.tensor(new_coors)
+                target_dict["mask_gt"] = torch.tensor(new_mask)
             else:
-                trans_image = self.transform(image=np_image, keypoints=keypoints,
-                                             )
+                trans_image = self.transform(image=resized_img, keypoints=kp_crop)
                 kp = trans_image['keypoints']
 
-
-
-
+            # --- post-transform keypoint visibility check in 256x256 ---
             _, ymax, xmax = trans_image['image'].shape
             keypoints = []
             for x, y, view in kp:
@@ -755,32 +766,21 @@ if has_pytorch:
                 else:
                     keypoints.append([x, y, 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
-            b, padded_ratio = self.calculate_boxes_and_padded(k)
-            target_dict["padded_ratio"] = padded_ratio
-
             k = torch.reshape(k, (-1, 3))
-            b = torch.reshape(torch.tensor(b), (-1, 4))
 
+            # --- store original bbox for imageshape / PnP ---
+            b = torch.tensor([x1, y1, x2, y2], dtype=torch.float32).reshape(1, 4)
 
             trans = self.to_tensor
-
-
-
             tt = trans(image=trans_image['image'])
-
             torch_image = tt['image']
 
-            # if b[:,0]+5 < 0 or b[:,2]+5<0 or b[:,1]-5>1920 or b[:,3]-5>1200:
-            #     print(b)
-            target_dict["boxes"] = b  # [x1,y1,x2,y2]
+            target_dict["boxes"] = b
             target_dict["labels"] = torch.ones(1, dtype=torch.int64)
             target_dict["keypoints"] = k.unsqueeze(0)
             torch_image = torch.transpose(torch_image, dim0=-2, dim1=-1)
-            # if self.is_valid:
-            # target_dict["sample_id"] = sample_id
             target_dict["q_gt"] = torch.tensor(q)
             target_dict["r_gt"] = torch.tensor(r)
-
 
             return torch_image, target_dict
 
