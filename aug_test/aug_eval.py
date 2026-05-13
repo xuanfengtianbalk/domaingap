@@ -88,6 +88,49 @@ def print_stats(name, e_ori, e_r, fail, good):
     print(f"    TransErr: mean={np.mean(e_r):.3f}m med={np.median(e_r):.3f}m")
 
 
+def test_coords_gs(loader, aug_type, n_max=200):
+    """PnP from coordinate ground truth (continuous coors, same as coordinates)"""
+    err_ori, err_r, fail_cnt, good_cnt = [], [], 0, 0
+    cnt = 0
+    for samples, targets in tqdm(loader, desc=f'{aug_type} coords_gs', total=n_max):
+        r_gt = targets["r_gt"].squeeze()
+        q_gt = targets["q_gt"].squeeze()
+        cnt += 1
+        for i in range(samples.shape[0]):
+            if "coors_gt" not in targets or "mask_gt" not in targets:
+                fail_cnt += 1; continue
+            coors = targets["coors_gt"][i].clone()
+            mask_gt = targets["mask_gt"][i].float()
+            gtbbox = torch.round(targets["boxes"][i].squeeze(0))
+
+            mask = mask_gt > 0.5
+            mask = mask.expand_as(coors)
+            coors[~mask] = float('nan')
+
+            coors = coors.permute(2, 1, 0).cpu().detach().numpy()
+            bbox_np = gtbbox.cpu().numpy()
+            is_true, qv, tv = pose_calculats_from_coors(Camera.K, coors, bbox_np)
+            e_ori, _, e_r, _, fail, good = compute_pose_error(qv, tv, q_gt, r_gt, is_true)
+            if fail: fail_cnt += 1
+            else:
+                eo, er = float(e_ori), float(e_r)
+                if eo > 1 or er > 1:
+                    sid = loader.dataset.sample_ids[cnt-1] if hasattr(loader.dataset, 'sample_ids') else f'#{cnt}'
+                    print(f'  [!] coords_gs {aug_type} #{cnt} {sid}: ori={eo:.1f}° trans={er:.3f}m')
+                err_ori.append(eo); err_r.append(er)
+                if good: good_cnt += 1
+        if cnt >= n_max:
+            break
+    return err_ori, err_r, fail_cnt, good_cnt
+    n = len(e_ori)
+    if n == 0:
+        print(f"  {name}: All failed PnP")
+        return
+    print(f"  {name}: n={n}, fail={fail}, 5°5cm={100*good/n:.1f}%")
+    print(f"    OriErr:  mean={np.mean(e_ori):.1f}° med={np.median(e_ori):.1f}°")
+    print(f"    TransErr: mean={np.mean(e_r):.3f}m med={np.median(e_r):.3f}m")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--aug', type=str, nargs='+', default=['none','aug4','augmix'])
@@ -111,3 +154,8 @@ if __name__ == '__main__':
         loader2 = torch.utils.data.DataLoader(dataset2, batch_size=1, shuffle=False, num_workers=4)
         eo_c, er_c, f_c, g_c = test_coords(loader2, aug_type)
         print_stats('coordinates', eo_c, er_c, f_c, g_c)
+
+        dataset3 = build_dataset(config, args.mode, aug_type=aug_type)
+        loader3 = torch.utils.data.DataLoader(dataset3, batch_size=1, shuffle=False, num_workers=4)
+        eo_g, er_g, f_g, g_g = test_coords_gs(loader3, aug_type)
+        print_stats('coordinates_gs', eo_g, er_g, f_g, g_g)

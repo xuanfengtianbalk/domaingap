@@ -741,7 +741,7 @@ if has_pytorch:
                 mask_crop = mask[y1:y2, x1:x2]
                 coors_resized = np.transpose(cv2.resize(
                     np.transpose(coors_crop, (1, 2, 0)), (256, 256),
-                    interpolation=cv2.INTER_LINEAR), (2, 0, 1))
+                    interpolation=cv2.INTER_NEAREST), (2, 0, 1))
                 mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
                                           interpolation=cv2.INTER_NEAREST)
 
