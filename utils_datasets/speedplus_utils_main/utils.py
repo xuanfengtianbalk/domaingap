@@ -35,6 +35,10 @@ class Camera:
     """" Utility class for accessing camera parameters. """
 
     speed_root = '/opt/dl_workspace/datasets/speedplus/speedplus/'
+    _alt_root = 'datasets/speedplus/speedplus/'
+    if not os.path.exists(os.path.join(speed_root, 'camera.json')):
+        if os.path.exists(os.path.join(_alt_root, 'camera.json')):
+            speed_root = _alt_root
 
     with open(os.path.join(speed_root, 'camera.json'), 'r') as f:
         camera_params = json.load(f)
