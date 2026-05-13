@@ -51,10 +51,12 @@ def compute_pose_error(qvecs, tvecs, qgt, rgt, is_true):
         # 四元数计算误差角
         qvecs = torch.tensor(qvecs).reshape(-1)
         tvecs = torch.tensor(tvecs).reshape(-1)
-
+        qvecs = qvecs / torch.norm(qvecs)  # 归1化
+        qgt_norm = qgt / torch.norm(qgt)   # 归1化
         # 计算误差角度
-        qgt_ = qgt * torch.tensor([1.0, -1.0, -1.0, -1.0])
+        qgt_ = qgt_norm * torch.tensor([1.0, -1.0, -1.0, -1.0])
         q_ = quatProduct(qgt_.type_as(qvecs), qvecs)
+        q_ = q_ / torch.norm(q_)  # 归1化
         err_ori = 2 * torch.arccos(abs(q_[0])) * 180 / math.pi
         if err_ori < 0.169:
             err_ori = torch.tensor(0)

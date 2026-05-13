@@ -573,6 +573,10 @@ if has_pytorch:
             x_add = x_all / 10
             y_add = y_all / 10
             box = [x1 - x_add, y1 - y_add, x2 + x_add, y2 + y_add]
+            box[0] = max(box[0], 0)
+            box[1] = max(box[1], 0)
+            box[2] = min(box[2], 1920)
+            box[3] = min(box[3], 1200)
             return box, padded_ratio
 
         def whitening(self, img):
