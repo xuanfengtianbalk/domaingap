@@ -34,7 +34,7 @@ class SpaceAugTransform:
 
     def _build(self):
         """Build the albumentations part of the pipeline."""
-        t = self.aug_type
+        t = self.aug_type.lower()
         if t in ('none', 'styleaug'):
             return A.Compose([],
                              keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
@@ -50,7 +50,7 @@ class SpaceAugTransform:
                 A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
                          A.Blur(blur_limit=3, p=0.5)], p=1),
                 A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
-                                 num_flare_circles_range=(1, 2), p=0.5),
+                                 num_flare_circles_range=(1, 2), p=1.0),
             ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                 additional_targets={'mask': 'mask', 'coors': 'mask'})
 
