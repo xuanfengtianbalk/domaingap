@@ -26,8 +26,8 @@ if __name__ == '__main__':
     all_images = sorted([f for f in os.listdir(DATASET_DIR+'/synthetic/images') if f.endswith(('.jpg','.png')) and f in label_dict])
     selected = random.sample(all_images, min(10, len(all_images)))
 
-    aug_types = ['aug1', 'aug2', 'aug3', 'aug4', 'styleaug', 'augmix']
-    n_cols = 8
+    aug_types = ['augbaseline', 'aug1', 'aug2', 'aug3', 'aug4', 'styleaug', 'augmix']
+    n_cols = 9  # crop + 7 augs + sunlamp
 
     ds = PyTorchSatellitePoseEstimationDataset(
         split='train', speed_root=DATASET_DIR, points=body_points)
@@ -62,7 +62,7 @@ if __name__ == '__main__':
         cropped = full_img[y1:y2, x1:x2]
         resized = cv2.resize(cropped, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-        fig, axes = plt.subplots(1, n_cols, figsize=(24, 3))
+        fig, axes = plt.subplots(1, n_cols, figsize=(28, 3))
         axes[0].imshow(resized); axes[0].set_title(f'Crop 256x256\n[{x1},{y1},{x2},{y2}]', fontsize=6); axes[0].axis('off')
 
         for j, at in enumerate(aug_types):

@@ -438,6 +438,7 @@ def main():
                                   sampler=train_sampler)
         val_dataset = build_dataset(config, 'validation')
         val_loader = DataLoader(val_dataset, batch_size=config['TRAIN']['BATCH_SIZE'], shuffle=False, num_workers=8)
+        val_loader_eval = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
 
         sunlamp_dataset = build_dataset(config, 'sunlamp')
         sunlamp_loader = DataLoader(sunlamp_dataset, batch_size=1, shuffle=False, num_workers=1)
@@ -520,10 +521,17 @@ def main():
                 with open(file_path, 'w') as f:
                     json.dump(data, f)
 
+            print('testing on validation...')
+            result_dict = eval_one_epoch(model, val_loader_eval, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            for name, data in result_dict.items():
+                file_path = f"{end_path_name}/validation_result_{name}.json"
+                with open(file_path, 'w') as f:
+                    json.dump(data, f)
+
 
     elif args.mode == 'evaluate':
         from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
-        for mode in ['lightbox', 'sunlamp']:
+        for mode in ['lightbox', 'sunlamp', 'validation']:
             dataset = build_dataset(config, mode)
             loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
             criterion = KeypointRCNNLoss(sigma=3)

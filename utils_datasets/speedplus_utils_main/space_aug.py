@@ -40,6 +40,20 @@ class SpaceAugTransform:
                              keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                              additional_targets={'mask': 'mask', 'coors': 'mask'})
 
+        if t == 'augbaseline':
+            import cv2
+            return A.Compose([
+                A.RandomBrightnessContrast(p=1),
+                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+                                   border_mode=cv2.BORDER_CONSTANT, fill=0),
+                A.OneOf([A.GaussNoise()], p=0.5),
+                A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
+                         A.Blur(blur_limit=3, p=0.5)], p=1),
+                A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
+                                 num_flare_circles_range=(1, 2), p=0.5),
+            ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+                additional_targets={'mask': 'mask', 'coors': 'mask'})
+
         # Incremental aug levels
         augs = []
         base_augs = [
