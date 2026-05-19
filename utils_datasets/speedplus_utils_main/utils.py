@@ -497,7 +497,7 @@ if has_pytorch:
         """ SPEED dataset that can be used with DataLoader for PyTorch training. """
 
         def __init__(self, split='train', speed_root='datasets/', points=None, transform=None,
-                     IS_VALID=False):
+                     IS_VALID=False, padded=False):
             import albumentations as A
             # self.mask = A.Compose([A.CoarseDropout(max_holes=3, max_height=150, max_width=150, min_holes=2, min_height=50, min_width=50
             #              , fill_value=255, mask_fill_value=100,p=0.5)])
@@ -541,6 +541,7 @@ if has_pytorch:
                 self.labels = {label['filename']: {'q': label['q_vbs2tango_true'], 'r': label['r_Vo2To_vbs_true']}
                                for label in label_list}
             self.transform = transform
+            self.padded = padded
             self.points = points
             self.to_tensor = A.Compose([ToTensorV2(p=1.0)])
 
@@ -562,7 +563,7 @@ if has_pytorch:
                 x1, y1, distance = myproject2(p_axes=p_axes, q=q, r=r)
             return [[x, y, 0] for x, y in zip(x1, y1)], distance
 
-        def calculate_boxes_and_padded(self, y):
+        def calculate_boxes_and_padded(self, y, padded=False):
             x1 = y[:, 0].min().item()
             x2 = y[:, 0].max().item()
             y1 = y[:, 1].min().item()
@@ -577,37 +578,13 @@ if has_pytorch:
             x_add = x_all / 10
             y_add = y_all / 10
             box = [x1 - x_add, y1 - y_add, x2 + x_add, y2 + y_add]
-            box[0] = max(box[0], 0)
-            box[1] = max(box[1], 0)
-            box[2] = min(box[2], 1920)
-            box[3] = min(box[3], 1200)
+            if not padded:
+                box[0] = max(box[0], 0)
+                box[1] = max(box[1], 0)
+                box[2] = min(box[2], 1920)
+                box[3] = min(box[3], 1200)
             return box, padded_ratio
 
-        def whitening(self, img):
-            img = img / 255.0
-            m, dev = cv2.meanStdDev(img)  # 返回均值和方差，分别对应3个通道
-            img[:, :] = (img[:, :] - m[0]) / (dev[0] + 1e-6)
-
-            # 将 像素值 低于 值域区间[0, 255] 的 像素点 置0
-            img = img * 255
-            img *= (img > 0)
-            # 将 像素值 高于 值域区间[0, 255] 的 像素点 置255
-            img = img * (img <= 255) + 255 * (img > 255)
-            img = img.astype(np.uint8)
-            return img
-
-        # def add_block(self, image, ):
-
-        def get_boxes_from_q_r(self, q, r):
-            kp = self.calculate_landmarks(p_axes=self.points, q=q, r=r)
-            keypoints = [p[:2]for p in kp]
-            # for x, y, _ in kp:
-            #     if x > 0 and y > 0 and x < 1920 and y < 1200:
-            #         keypoints.append([x, y, 1])
-            #     else:             #         keypoints.append([x, y, 0])
-            k = torch.tensor(keypoints, dtype=torch.float32)
-            b, _ = self.calculate_boxes_and_padded(k)
-            return b
 
 
         def calculate_world_coordinates(self, depth_map, pose, fx, fy, cx, cy):
@@ -719,13 +696,21 @@ if has_pytorch:
                     kp_orig.append([x, y, view])
                 else:
                     kp_orig.append([x, y, 0])
-            b, padded_ratio = self.calculate_boxes_and_padded(torch.tensor(kp_orig, dtype=torch.float32))
+            b, padded_ratio = self.calculate_boxes_and_padded(torch.tensor(kp_orig, dtype=torch.float32), padded=self.padded)
             target_dict["padded_ratio"] = padded_ratio
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
 
             # --- crop + resize image to 256x256 ---
             import cv2
-            cropped_img = np_image[y1:y2, x1:x2]
+            H, W = ymax, xmax
+            cx1, cy1 = max(x1, 0), max(y1, 0)
+            cx2, cy2 = min(x2, W), min(y2, H)
+            cropped_img = np_image[cy1:cy2, cx1:cx2]
+            if self.padded:
+                p_top, p_bottom = max(0, -y1), max(0, y2 - H)
+                p_left, p_right = max(0, -x1), max(0, x2 - W)
+                if p_top or p_bottom or p_left or p_right:
+                    cropped_img = cv2.copyMakeBorder(cropped_img, p_top, p_bottom, p_left, p_right, cv2.BORDER_CONSTANT, value=0)
             resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
 
             # --- adjust keypoints to original crop space (relative to x1, y1) ---
@@ -741,8 +726,12 @@ if has_pytorch:
                 coors = self.get_coors(depth_path, pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
                 mask = np.all(np.isfinite(coors), axis=0)
 
-                coors_crop = coors[:, y1:y2, x1:x2]
-                mask_crop = mask[y1:y2, x1:x2]
+                coors_crop = coors[:, cy1:cy2, cx1:cx2]
+                mask_crop = mask[cy1:cy2, cx1:cx2]
+                if self.padded:
+                    if p_top or p_bottom or p_left or p_right:
+                        coors_crop = np.pad(coors_crop, ((0,0),(p_top,p_bottom),(p_left,p_right)), constant_values=np.nan)
+                        mask_crop = np.pad(mask_crop, ((p_top,p_bottom),(p_left,p_right)), constant_values=0)
                 coors_resized = np.transpose(cv2.resize(
                     np.transpose(coors_crop, (1, 2, 0)), (256, 256),
                     interpolation=cv2.INTER_NEAREST), (2, 0, 1))
@@ -991,38 +980,7 @@ def get_few_sample_train_set(loader, dis_list, num_viewpoint):
     return temp1
 
 import torch.nn.functional as F
-def crop_tensor_image_(image, bbox):
-    padded=False
-    xmin=bbox[0]
-    ymin=bbox[1]
-    xmax=bbox[2]
-    ymax=bbox[3]
-    #计算需要填充的边缘
-    pad_left = max(0, -xmin)
-    pad_top = max(0, -ymin)
-    pad_right = max(0, xmax - image.shape[1])
-    pad_bottom = max(0, ymax - image.shape[2])
 
-    if pad_left or pad_top or pad_right or pad_bottom:
-        padded=True
-        padding = [int(_) for _ in [pad_top, pad_bottom, pad_left, pad_right ]]
-
-        image = F.pad(image, padding, value=0)
-    #调整bbox坐标
-    xmin = int(torch.clamp(xmin, 0, image.shape[1] - 1))
-    ymin = int(torch.clamp(ymin, 0, image.shape[2] - 1))
-    if pad_top:
-        ymax = int(torch.clamp(ymax + pad_top, 0, image.shape[2]))
-    else:
-        ymax = int(torch.clamp(ymax, 0, image.shape[2]))
-    if pad_right:
-        xmax = int(torch.clamp(xmax + pad_right, 0, image.shape[1]))
-    else:
-        xmax = int(torch.clamp(xmax, 0, image.shape[1]))
-
-
-    croped_image=image[:,xmin:xmax,ymin:ymax]
-    return croped_image, padded
 
 from cv2 import solvePnP, solvePnPRansac
 def rotation_matrix_to_quaternion(r1, r2, r3):
@@ -1137,8 +1095,17 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     coors_nan = coors.copy()
     coors_nan[~mask] = np.nan
 
-    # 3. keypoints: 形状 (1, K, 2) -> 去掉 batch 维度
-    keypoints = target_dict["keypoints"].cpu().numpy().squeeze(0)  # (K, 2)
+    # 3. keypoints: 形状 (1, K, 3) -> 去掉 batch 维度
+    kp_full = target_dict["keypoints"].cpu().numpy().squeeze(0)  # (K, 3) [x, y, view]
+    gtbbox = target_dict["boxes"].squeeze(0).cpu().numpy()  # [x1, y1, x2, y2]
+    crop_w = gtbbox[2] - gtbbox[0]
+    crop_h = gtbbox[3] - gtbbox[1]
+    scale_x = 256.0 / crop_w
+    scale_y = 256.0 / crop_h
+    kp_scaled = kp_full.copy()
+    kp_scaled[:, 0] = kp_full[:, 0] * scale_x
+    kp_scaled[:, 1] = kp_full[:, 1] * scale_y
+    visible = kp_full[:, 2] > 0
 
     # 根据 coord_mode 创建不同数量的子图
     if coord_mode == 'channels':
@@ -1150,8 +1117,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
 
     # ---------- 子图1: 原始图像 + 关键点 ----------
     ax_img.imshow(img)
-    if keypoints.size > 0:
-        ax_img.scatter(keypoints[:, 0], keypoints[:, 1], c='red', s=20, marker='o', label='keypoints')
+    ax_img.scatter(kp_scaled[:, 0], kp_scaled[:, 1], c='red', s=20, marker='o', label='keypoints')
     ax_img.set_title(f"Image with keypoints (index {idx})")
     ax_img.axis('off')
     ax_img.legend()
@@ -1201,8 +1167,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     mask_rgb = np.stack([mask, np.zeros_like(mask), np.zeros_like(mask)], axis=-1).astype(np.float32)
     img_overlay = img_overlay * 0.6 + mask_rgb * 0.4
     ax_overlay.imshow(img_overlay)
-    if keypoints.size > 0:
-        ax_overlay.scatter(keypoints[:, 0], keypoints[:, 1], c='lime', s=20, marker='o')
+    ax_overlay.scatter(kp_scaled[:, 0], kp_scaled[:, 1], c='lime', s=20, marker='o')
     ax_overlay.set_title("Image + mask (red=valid) + keypoints (green)")
     ax_overlay.axis('off')
 
@@ -1223,7 +1188,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
         print(f"  Object coordinates range (X): [{valid_coors[:,0].min():.3f}, {valid_coors[:,0].max():.3f}]")
         print(f"  Object coordinates range (Y): [{valid_coors[:,1].min():.3f}, {valid_coors[:,1].max():.3f}]")
         print(f"  Object coordinates range (Z): [{valid_coors[:,2].min():.3f}, {valid_coors[:,2].max():.3f}]")
-    print(f"  Keypoints shape: {keypoints.shape}")
+    print(f"  Keypoints shape: {kp_full.shape}")
     print(f"  q_gt: {target_dict['q_gt'].cpu().numpy()}")
     print(f"  r_gt: {target_dict['r_gt'].cpu().numpy()}")
     if 'boxes' in target_dict:
@@ -1292,9 +1257,10 @@ if __name__ == "__main__":
         split='train',
         speed_root=dataset_config['train_root_dir'],
         points=points,
-        transform=trans
+        transform=trans,
+        padded=True
     )
 
     # 可视化前几个样本
-    for i in range(min(5, len(dataset))):
+    for i in range(min(15, len(dataset))):
         visualize_dataset_sample(dataset, idx=i, save_path=f'sample_{i}.png', coord_mode='rgb')

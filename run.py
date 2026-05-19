@@ -32,7 +32,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def build_dataset(config, split, aug_type='none'):
+def build_dataset(config, split, aug_type='none', padded=False):
     """根据配置构建数据集，split可以是'train'/'val'/'test'"""
     dataset_config = config['DATASET']
     transform_list = []
@@ -88,7 +88,7 @@ def build_dataset(config, split, aug_type='none'):
                               )
 
         dataset = PyTorchSatellitePoseEstimationDataset(split=split, speed_root=dataset_config['train_root_dir'], points=points,
-                                                              transform=trans)
+                                                               transform=trans, padded=padded)
 
     return dataset
 
@@ -375,6 +375,8 @@ def parse_args():
                         help='Space augmentation: aug1-aug4, aug5, augmix, styleaug, none')
     parser.add_argument('--resume_path', type=str, default='',
                         help='Workingdir UUID path for evaluate mode')
+    parser.add_argument('--padded', action='store_true', default=False,
+                        help='Allow bbox to extend beyond image boundaries (pad with black)')
     # 使用 parse_known_args 以接受额外参数
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -429,7 +431,7 @@ def main():
         model.load_state_dict(checkpoint, strict=True)
 
     if args.mode == 'train':
-        train_dataset = build_dataset(config, 'train', aug_type=args.aug_type)
+        train_dataset = build_dataset(config, 'train', aug_type=args.aug_type, padded=args.padded)
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
                                            shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
