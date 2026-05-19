@@ -1,6 +1,9 @@
 import numpy as np
 import json
 import os
+import cv2
+import warnings
+warnings.filterwarnings('ignore', message='Got processor for keypoints, but no transform to process it.')
 from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from albumentations.pytorch import ToTensorV2
@@ -561,7 +564,7 @@ if has_pytorch:
             # no pose label for test
             if partition == 'train':
                 x1, y1, distance = myproject2(p_axes=p_axes, q=q, r=r)
-            return [[x, y, 0] for x, y in zip(x1, y1)], distance
+            return [[x, y, 1] for x, y in zip(x1, y1)], distance
 
         def calculate_boxes_and_padded(self, y, padded=False):
             x1 = y[:, 0].min().item()
@@ -701,7 +704,6 @@ if has_pytorch:
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
 
             # --- crop + resize image to 256x256 ---
-            import cv2
             H, W = ymax, xmax
             cx1, cy1 = max(x1, 0), max(y1, 0)
             cx2, cy2 = min(x2, W), min(y2, H)

@@ -15,7 +15,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
     model.eval()
     losses_epoch = []
     with torch.no_grad():
-        for samples, targets in tqdm(dataloader, desc="Validing"):
+        for samples, targets in tqdm(dataloader, desc="Validing", ncols=80):
             target_list = []
             for i in range(samples.shape[0]):
                 target_list.append({k: targets[k][i].to(device) for k in targets.keys()})
@@ -59,7 +59,7 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
     activate = torch.nn.Sigmoid()
 
     with torch.no_grad():
-        for samples, targets in tqdm(dataloader, desc="Validing"):
+        for samples, targets in tqdm(dataloader, desc="Validing", ncols=80):
             rgt = torch.tensor(targets["r_gt"]).squeeze()
             qgt = torch.tensor(targets["q_gt"]).squeeze()
             gtkp = torch.tensor(targets["keypoints"].squeeze())

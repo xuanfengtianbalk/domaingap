@@ -3,7 +3,7 @@ from tqdm import tqdm
 def train_one_epoch(model, dataloader, model_type, criterion, optimizer, scheduler, device):
     model.train()
     losses_epoch = []
-    pbar = tqdm(dataloader, desc="Training")
+    pbar = tqdm(dataloader, desc="Training", ncols=80)
     for idx, (samples, targets) in enumerate(pbar):
         target_list = []
         for i in range(samples.shape[0]):
