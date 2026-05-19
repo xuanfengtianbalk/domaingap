@@ -22,8 +22,10 @@ def test_kps(loader, aug_type, n_max=500):
         for i in range(samples.shape[0]):
             kp = targets["keypoints"][i].squeeze(0).cpu().numpy()
             gtbbox = targets["boxes"][i].squeeze(0).cpu().numpy()
-            kp[:, 0] += gtbbox[0]
-            kp[:, 1] += gtbbox[1]
+            crop_w = gtbbox[2] - gtbbox[0]
+            crop_h = gtbbox[3] - gtbbox[1]
+            kp[:, 0] = kp[:, 0] * crop_w / 256.0 + gtbbox[0]
+            kp[:, 1] = kp[:, 1] * crop_h / 256.0 + gtbbox[1]
             valid = np.ones(len(kp), dtype=bool)
             pgt = np.array(points)
             pf = np.zeros((len(valid), 3), dtype=np.float32)

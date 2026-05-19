@@ -33,7 +33,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
                     mask_gt_list.append(target["mask_gt"].float().to(device))
                 if 'keypoints_gs' in model_type:
                     gt_target.append(target['keypoints'])
-                imageshapes.append(torch.tensor([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]]))
+                imageshapes.append(torch.tensor([256, 256]))
             with torch.amp.autocast('cuda'):
                 inputs = torch.stack(org_imgs_list)
                 if 'coordinates' in model_type or 'coordinates_gs' in model_type:
@@ -71,7 +71,7 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
             for img, target in zip(samples, target_list):
                 gtbbox = torch.round(target["boxes"].squeeze(0))
                 org_imgs_list.append(img.to(device))
-                imageshape = torch.tensor([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]])
+                imageshape = torch.tensor([256, 256])
             with torch.cuda.amp.autocast():
                 inputs = torch.stack(org_imgs_list)
                 outputs = model(inputs)
@@ -80,8 +80,10 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
                 result1 = heatmaps_to_keypoints(outputs['keypoints_gs'], imageshape)
                 p_all = result1[0][0].squeeze()
 
-                p_all[:, 0] = p_all[:, 0] + gtbbox[0]
-                p_all[:, 1] = p_all[:, 1] + gtbbox[1]
+                crop_w = gtbbox[2] - gtbbox[0]
+                crop_h = gtbbox[3] - gtbbox[1]
+                p_all[:, 0] = p_all[:, 0] * crop_w / 256.0 + gtbbox[0]
+                p_all[:, 1] = p_all[:, 1] * crop_h / 256.0 + gtbbox[1]
 
                 pgt = np.array(points)
                 p_ = torch.as_tensor(p_all)

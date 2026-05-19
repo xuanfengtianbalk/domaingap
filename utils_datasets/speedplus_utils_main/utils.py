@@ -715,11 +715,13 @@ if has_pytorch:
                     cropped_img = cv2.copyMakeBorder(cropped_img, p_top, p_bottom, p_left, p_right, cv2.BORDER_CONSTANT, value=0)
             resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-            # --- adjust keypoints to original crop space (relative to x1, y1) ---
+            # --- adjust keypoints to 256x256 space ---
+            scale_kp_x = 256.0 / (x2 - x1)
+            scale_kp_y = 256.0 / (y2 - y1)
             kp_crop = []
             for x, y, v in kp:
-                nx = x - x1
-                ny = y - y1
+                nx = (x - x1) * scale_kp_x
+                ny = (y - y1) * scale_kp_y
                 kp_crop.append([nx, ny, v])
 
             # --- get coors/mask, crop+resize, then apply transforms ---
@@ -753,11 +755,11 @@ if has_pytorch:
                 kp = trans_image['keypoints']
 
             # --- post-transform keypoint visibility check in 256x256 ---
-            _, ymax, xmax = trans_image['image'].shape
+            # _, ymax, xmax = trans_image['image'].shape
             keypoints = []
-            for x, y, view in kp:
-                if x > 0 and y > 0 and x < xmax and y < ymax:
-                    keypoints.append([x, y, view])
+            for x, y, v in kp:
+                if x > 0 and y > 0 and x < 256 and y < 256:
+                    keypoints.append([x, y, 1])
                 else:
                     keypoints.append([x, y, 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
@@ -943,8 +945,11 @@ def get_mean_std(loader):
     return mean, std
 
 
-from utils_datasets.rotation_parameter import points_trans_accord, quaternion2rot
-from utils_datasets.tools import splot
+try:
+    from utils_datasets.rotation_parameter import points_trans_accord, quaternion2rot
+    from utils_datasets.tools import splot
+except ImportError:
+    pass
 
 
 def get_few_sample_train_set(loader, dis_list, num_viewpoint):
@@ -1098,15 +1103,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     coors_nan[~mask] = np.nan
 
     # 3. keypoints: 形状 (1, K, 3) -> 去掉 batch 维度
-    kp_full = target_dict["keypoints"].cpu().numpy().squeeze(0)  # (K, 3) [x, y, view]
-    gtbbox = target_dict["boxes"].squeeze(0).cpu().numpy()  # [x1, y1, x2, y2]
-    crop_w = gtbbox[2] - gtbbox[0]
-    crop_h = gtbbox[3] - gtbbox[1]
-    scale_x = 256.0 / crop_w
-    scale_y = 256.0 / crop_h
-    kp_scaled = kp_full.copy()
-    kp_scaled[:, 0] = kp_full[:, 0] * scale_x
-    kp_scaled[:, 1] = kp_full[:, 1] * scale_y
+    kp_full = target_dict["keypoints"].cpu().numpy().squeeze(0)  # (K, 3) [x, y, view], already in 256 space
     visible = kp_full[:, 2] > 0
 
     # 根据 coord_mode 创建不同数量的子图
@@ -1119,7 +1116,8 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
 
     # ---------- 子图1: 原始图像 + 关键点 ----------
     ax_img.imshow(img)
-    ax_img.scatter(kp_scaled[:, 0], kp_scaled[:, 1], c='red', s=20, marker='o', label='keypoints')
+    if visible.any():
+        ax_img.scatter(kp_full[visible, 0], kp_full[visible, 1], c='red', s=20, marker='o', label='keypoints')
     ax_img.set_title(f"Image with keypoints (index {idx})")
     ax_img.axis('off')
     ax_img.legend()
@@ -1169,7 +1167,8 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     mask_rgb = np.stack([mask, np.zeros_like(mask), np.zeros_like(mask)], axis=-1).astype(np.float32)
     img_overlay = img_overlay * 0.6 + mask_rgb * 0.4
     ax_overlay.imshow(img_overlay)
-    ax_overlay.scatter(kp_scaled[:, 0], kp_scaled[:, 1], c='lime', s=20, marker='o')
+    if visible.any():
+        ax_overlay.scatter(kp_full[visible, 0], kp_full[visible, 1], c='lime', s=20, marker='o')
     ax_overlay.set_title("Image + mask (red=valid) + keypoints (green)")
     ax_overlay.axis('off')
 
@@ -1231,28 +1230,30 @@ if __name__ == "__main__":
     IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
     config = {'TRAIN': {'P_AUG_SUN': 0.5}}  # 示例配置，根据实际调整
 
-    T = [
-        # A.Resize(height=300, width=480, p=1),
-        A.RandomBrightnessContrast(p=1),
-        # A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
-        #                    border_mode=cv2.BORDER_CONSTANT, fill=1),
-        A.OneOf([A.GaussNoise()], p=0.5),
-        A.OneOf([
-            A.MotionBlur(p=0.5),
-            A.MedianBlur(blur_limit=3, p=0.5),
-            A.Blur(blur_limit=3, p=0.5),
-        ], p=1),
-        A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
-                         num_flare_circles_range=(1, 2),
-                         p=config['TRAIN']['P_AUG_SUN']),
-        A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
-    ]
-    trans = A.Compose(T,
-                      keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
-                      additional_targets={
-                          'mask': 'mask',
-                          'coors': 'mask'
-                      })
+    # T = [
+    #     # A.Resize(height=300, width=480, p=1),
+    #     A.RandomBrightnessContrast(p=1),
+    #     A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1,
+    #                        border_mode=cv2.BORDER_CONSTANT, fill=255),
+    #     A.OneOf([A.GaussNoise()], p=0.5),
+    #     A.OneOf([
+    #         A.MotionBlur(p=0.5),
+    #         A.MedianBlur(blur_limit=3, p=0.5),
+    #         A.Blur(blur_limit=3, p=0.5),
+    #     ], p=1),
+    #     A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
+    #                      num_flare_circles_range=(1, 2),
+    #                      p=config['TRAIN']['P_AUG_SUN']),
+    #     A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+    # ]
+    # trans = A.Compose(T,
+    #                   keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+    #                   additional_targets={
+    #                       'mask': 'mask',
+    #                       'coors': 'mask'
+    #                   })
+    from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
+    trans = SpaceAugTransform('augbaseline')
 
     # 创建 dataset 实例
     dataset = PyTorchSatellitePoseEstimationDataset(
