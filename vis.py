@@ -3,6 +3,7 @@ from typing import List, Union, Optional, Tuple
 
 
 import torch
+import cv2
 from tqdm import tqdm
 
 import numpy as np
@@ -123,7 +124,10 @@ def eval_one_epoch_visualization(
                 kp_global = target['keypoints'].cpu().numpy()  # (N, 3) already in crop space
                 gt_keypoints_list.append(kp_global)
 
-                imageshape = np.array([gtbbox[2]-gtbbox[0], gtbbox[3]-gtbbox[1]])
+                imageshape = target["imageshape"]
+                print('kp_global:',kp_global)
+                # print(imageshape)
+                # print(gtbbox)
                 imageshapes_list.append(imageshape)
 
             # 前向推理
@@ -136,44 +140,50 @@ def eval_one_epoch_visualization(
                 if len(collected_images) >= num_samples:
                     break
 
-                # 原始裁剪并 resize 后的图像 (256x256)
-                img_resized = inputs[b].cpu().permute(1, 2, 0).numpy()
+                img_resized = inputs[b].cpu().permute(2, 1, 0).numpy()
                 img_resized = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
 
-                gt_kp_local = gt_keypoints_list[b]   # 相对裁剪框的坐标
-                # 关键点坐标需要缩放回 256x256 尺寸（因为原图被 resize 了）
-                scale_x = 256.0 / imageshapes_list[b][0]  # 原裁剪宽度 -> 256
-                scale_y = 256.0 / imageshapes_list[b][1]
-                gt_kp_resized = gt_kp_local.copy()
-                gt_kp_resized[:, 0] = gt_kp_local[:, 0] * scale_x
-                gt_kp_resized[:, 1] = gt_kp_local[:, 1] * scale_y
+                gt_kp = gt_keypoints_list[b]
+                print('gt_kp',gt_kp)
+                gt_bbox = gt_bboxes_list[b]
 
                 # 根据 model_type 生成不同的可视化子图
                 if 'keypoints_gs' in model_type:
-                    # 预测热图 -> 关键点
-                    heatmap = outputs['keypoints_gs'][b]  # (C, H, W) 或 (H, W, C)? 根据实际情况
-                    # print(heatmap.shape)
-                    # 假设热图形状 (C, 256, 256) 或 (256,256,C)，这里需要转成关键点坐标
-                    # 使用 heatmaps_to_keypoints 函数（沿用原代码中的函数）
-                    pred_keypoints = heatmaps_to_keypoints(heatmap.unsqueeze(0), imageshapes_list[b])[0][0]
-                    # 同样缩放坐标到 256 尺寸以便叠加显示
-                    pred_kp_resized = pred_keypoints.copy()
-                    pred_kp_resized[:, 0] = pred_keypoints[:, 0] * scale_x
-                    pred_kp_resized[:, 1] = pred_keypoints[:, 1] * scale_y
+                    heatmap = outputs['keypoints_gs'][b]
+                    pred_keypoints = heatmaps_to_keypoints(heatmap.unsqueeze(0), imageshapes_list[b])[0][0].cpu().numpy()
 
-                    # 创建图像：原图 + GT关键点 + 预测关键点
-                    fig, ax = plt.subplots(figsize=(6, 6))
-                    ax.imshow(img_resized)
-                    ax.scatter(gt_kp_resized[:, 0], gt_kp_resized[:, 1],
+                    gt_global = gt_kp[0, :, :2].copy()
+                    gt_global[:, 0] += gt_bbox[0]
+                    gt_global[:, 1] += gt_bbox[1]
+                    print('pred_keypoints',pred_keypoints)
+                    pred_global = pred_keypoints[:, :2].copy()
+                    pred_global[:, 0] += gt_bbox[0]
+                    pred_global[:, 1] += gt_bbox[1]
+
+                    canvas = np.ones((1200, 1920, 3), dtype=np.float32)
+                    crop_img = img_resized.copy()
+                    crop_h, crop_w = gt_bbox[3] - gt_bbox[1], gt_bbox[2] - gt_bbox[0]
+                    paste_img = cv2.resize(np.clip(crop_img * 255, 0, 255).astype(np.uint8),
+                                           (int(crop_w), int(crop_h)))
+                    x1, y1 = int(gt_bbox[0]), int(gt_bbox[1])
+                    x2, y2 = x1 + int(crop_w), y1 + int(crop_h)
+                    canvas[y1:y2, x1:x2] = paste_img.astype(np.float32) / 255.0
+
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    ax.imshow(canvas)
+                    print(gt_global)
+                    print(pred_global)
+                    ax.scatter(gt_global[:, 0], gt_global[:, 1],
                                c='lime', marker='x', s=40, label='GT')
-                    ax.scatter(pred_kp_resized[:, 0], pred_kp_resized[:, 1],
+                    ax.scatter(pred_global[:, 0], pred_global[:, 1],
                                c='red', marker='o', s=20, label='Pred')
                     ax.legend()
+                    ax.set_xlim(0, 1920)
+                    ax.set_ylim(1200, 0)
                     ax.set_title('Keypoints (GS)')
                     ax.axis('off')
                     plt.tight_layout()
 
-                    # 将 matplotlib figure 转为 numpy array
                     fig.canvas.draw()
                     img_arr = np.array(fig.canvas.buffer_rgba())[:, :, :3]
                     collected_images.append(img_arr)

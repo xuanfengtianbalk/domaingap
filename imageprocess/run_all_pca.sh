@@ -6,7 +6,7 @@ conda activate dinov3
 UUIDS=$(ls -d workingdir/*/model_final.pth 2>/dev/null | while read f; do basename $(dirname "$f"); done)
 
 for uuid in $UUIDS; do
-    for aug in aug1 aug2 aug3; do
+    for aug in aug4 aug4s; do
         echo "=== $uuid | $aug ==="
         python imageprocess/pca_stages.py \
           --model_uuid $uuid \

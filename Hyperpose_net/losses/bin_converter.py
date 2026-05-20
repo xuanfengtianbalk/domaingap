@@ -10,7 +10,7 @@ import numpy as np
 class BinConverter(nn.Module):
     def __init__(self, sample_range, n_per_unit=30, max_sigma=0.25,
                  pad_factor=4.0, sigma_factor=1.5, min_bins=5, use_mask=True,
-                 loss_reduction='mean', fg_threshold=5):
+                 loss_reduction='mean', fg_threshold=10):
         super().__init__()
         self.use_mask = use_mask
         self.loss_reduction = loss_reduction

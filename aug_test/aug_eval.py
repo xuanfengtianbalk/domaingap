@@ -22,10 +22,8 @@ def test_kps(loader, aug_type, n_max=500):
         for i in range(samples.shape[0]):
             kp = targets["keypoints"][i].squeeze(0).cpu().numpy()
             gtbbox = targets["boxes"][i].squeeze(0).cpu().numpy()
-            crop_w = gtbbox[2] - gtbbox[0]
-            crop_h = gtbbox[3] - gtbbox[1]
-            kp[:, 0] = kp[:, 0] * crop_w / 256.0 + gtbbox[0]
-            kp[:, 1] = kp[:, 1] * crop_h / 256.0 + gtbbox[1]
+            kp[:, 0] += gtbbox[0]
+            kp[:, 1] += gtbbox[1]
             valid = np.ones(len(kp), dtype=bool)
             pgt = np.array(points)
             pf = np.zeros((len(valid), 3), dtype=np.float32)
@@ -135,9 +133,10 @@ def test_coords_gs(loader, aug_type, n_max=200):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--aug', type=str, nargs='+', default=['none','aug4','augmix'])
-    parser.add_argument('--mode', type=str, default='sunlamp')
+    parser.add_argument('--aug', type=str, nargs='+', default=['none','augbaseline'])
+    parser.add_argument('--mode', type=str, default='validation')
     args = parser.parse_args()
+
 
     config = load_config('configs/cfg.yaml')
 
@@ -152,12 +151,12 @@ if __name__ == '__main__':
         eo_k, er_k, f_k, g_k = test_kps(loader, aug_type)
         print_stats('keypoints', eo_k, er_k, f_k, g_k)
 
-        dataset2 = build_dataset(config, args.mode, aug_type=aug_type)
-        loader2 = torch.utils.data.DataLoader(dataset2, batch_size=1, shuffle=False, num_workers=4)
-        eo_c, er_c, f_c, g_c = test_coords(loader2, aug_type)
-        print_stats('coordinates', eo_c, er_c, f_c, g_c)
-
-        dataset3 = build_dataset(config, args.mode, aug_type=aug_type)
-        loader3 = torch.utils.data.DataLoader(dataset3, batch_size=1, shuffle=False, num_workers=4)
-        eo_g, er_g, f_g, g_g = test_coords_gs(loader3, aug_type)
-        print_stats('coordinates_gs', eo_g, er_g, f_g, g_g)
+        # dataset2 = build_dataset(config, args.mode, aug_type=aug_type)
+        # loader2 = torch.utils.data.DataLoader(dataset2, batch_size=1, shuffle=False, num_workers=4)
+        # eo_c, er_c, f_c, g_c = test_coords(loader2, aug_type)
+        # print_stats('coordinates', eo_c, er_c, f_c, g_c)
+        #
+        # dataset3 = build_dataset(config, args.mode, aug_type=aug_type)
+        # loader3 = torch.utils.data.DataLoader(dataset3, batch_size=1, shuffle=False, num_workers=4)
+        # eo_g, er_g, f_g, g_g = test_coords_gs(loader3, aug_type)
+        # print_stats('coordinates_gs', eo_g, er_g, f_g, g_g)

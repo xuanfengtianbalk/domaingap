@@ -22,7 +22,7 @@ def train_one_epoch(model, dataloader, model_type, criterion, optimizer, schedul
                 mask_gt_list.append(target["mask_gt"].float().to(device))
             if 'keypoints_gs' in model_type:
                 gt_target.append(target['keypoints'])
-            imageshapes.append(torch.tensor([256, 256]))
+            imageshapes.append(target["imageshape"])
         inputs = torch.stack(org_imgs_list)
         if 'coordinates' in model_type or 'coordinates_gs' in model_type:
             coors_gt = torch.stack(coors_gt_list)

@@ -703,6 +703,15 @@ if has_pytorch:
             target_dict["padded_ratio"] = padded_ratio
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
 
+            if self.split == 'train':
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                size = max(x2 - x1, y2 - y1)
+                x1 = cx - size // 2
+                y1 = cy - size // 2
+                x2 = cx + size // 2
+                y2 = cy + size // 2
+
             # --- crop + resize image to 256x256 ---
             H, W = ymax, xmax
             cx1, cy1 = max(x1, 0), max(y1, 0)
@@ -715,14 +724,21 @@ if has_pytorch:
                     cropped_img = cv2.copyMakeBorder(cropped_img, p_top, p_bottom, p_left, p_right, cv2.BORDER_CONSTANT, value=0)
             resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-            # --- adjust keypoints to 256x256 space ---
-            scale_kp_x = 256.0 / (x2 - x1)
-            scale_kp_y = 256.0 / (y2 - y1)
-            kp_crop = []
-            for x, y, v in kp:
-                nx = (x - x1) * scale_kp_x
-                ny = (y - y1) * scale_kp_y
-                kp_crop.append([nx, ny, v])
+            # --- adjust keypoints ---
+            if self.split == 'train':
+                scale_kp_x = 256.0 / (x2 - x1)
+                scale_kp_y = 256.0 / (y2 - y1)
+                kp_trans = []
+                for x, y, v in kp:
+                    nx = (x - x1) * scale_kp_x
+                    ny = (y - y1) * scale_kp_y
+                    kp_trans.append([nx, ny, v])
+            else:
+                kp_trans = []
+                for x, y, v in kp:
+                    nx = x - x1
+                    ny = y - y1
+                    kp_trans.append([nx, ny, v])
 
             # --- get coors/mask, crop+resize, then apply transforms ---
             if self.split == 'train' or self.split == 'validation':
@@ -742,7 +758,7 @@ if has_pytorch:
                 mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
                                           interpolation=cv2.INTER_NEAREST)
 
-                trans_image = self.transform(image=resized_img, keypoints=kp_crop,
+                trans_image = self.transform(image=resized_img, keypoints=kp_trans,
                                              mask=mask_resized.astype(np.uint8),
                                              coors=np.transpose(coors_resized, (1, 2, 0)))
                 kp = trans_image['keypoints']
@@ -751,22 +767,26 @@ if has_pytorch:
                 target_dict["coors_gt"] = torch.tensor(new_coors)
                 target_dict["mask_gt"] = torch.tensor(new_mask)
             else:
-                trans_image = self.transform(image=resized_img, keypoints=kp_crop)
+                trans_image = self.transform(image=resized_img, keypoints=kp_trans)
                 kp = trans_image['keypoints']
 
-            # --- post-transform keypoint visibility check in 256x256 ---
-            # _, ymax, xmax = trans_image['image'].shape
             keypoints = []
             for x, y, v in kp:
-                if x > 0 and y > 0 and x < 256 and y < 256:
-                    keypoints.append([x, y, 1])
+                if self.split == 'train':
+                    in_bounds = x > 0 and y > 0 and x < 256 and y < 256
+                    keypoints.append([x, y, v if in_bounds else 0])
                 else:
-                    keypoints.append([x, y, 0])
+                    in_bounds = x > 0 and y > 0 and x < (x2 - x1) and y < (y2 - y1)
+                    keypoints.append([x, y, v if in_bounds else 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
             k = torch.reshape(k, (-1, 3))
 
-            # --- store original bbox for imageshape / PnP ---
+            # --- store bbox for PnP, imageshape for loss ---
             b = torch.tensor([x1, y1, x2, y2], dtype=torch.float32).reshape(1, 4)
+            if self.split == 'train':
+                target_dict["imageshape"] = torch.tensor([256, 256])
+            else:
+                target_dict["imageshape"] = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
 
             trans = self.to_tensor
             tt = trans(image=trans_image['image'])
@@ -1102,8 +1122,17 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     coors_nan = coors.copy()
     coors_nan[~mask] = np.nan
 
-    # 3. keypoints: 形状 (1, K, 3) -> 去掉 batch 维度
-    kp_full = target_dict["keypoints"].cpu().numpy().squeeze(0)  # (K, 3) [x, y, view], already in 256 space
+    kp_full = target_dict["keypoints"].cpu().numpy().squeeze(0)
+    imageshape = target_dict.get("imageshape")
+    if imageshape is not None and imageshape[0].item() == 256:
+        kp_display = kp_full.copy()
+    else:
+        gtbbox = target_dict["boxes"].squeeze(0).cpu().numpy()
+        crop_w = gtbbox[2] - gtbbox[0]
+        crop_h = gtbbox[3] - gtbbox[1]
+        kp_display = kp_full.copy()
+        kp_display[:, 0] = kp_full[:, 0] * 256.0 / crop_w
+        kp_display[:, 1] = kp_full[:, 1] * 256.0 / crop_h
     visible = kp_full[:, 2] > 0
 
     # 根据 coord_mode 创建不同数量的子图
@@ -1117,7 +1146,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     # ---------- 子图1: 原始图像 + 关键点 ----------
     ax_img.imshow(img)
     if visible.any():
-        ax_img.scatter(kp_full[visible, 0], kp_full[visible, 1], c='red', s=20, marker='o', label='keypoints')
+        ax_img.scatter(kp_display[:, 0], kp_display[:, 1], c='red', s=20, marker='o', label='keypoints')
     ax_img.set_title(f"Image with keypoints (index {idx})")
     ax_img.axis('off')
     ax_img.legend()
@@ -1168,7 +1197,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     img_overlay = img_overlay * 0.6 + mask_rgb * 0.4
     ax_overlay.imshow(img_overlay)
     if visible.any():
-        ax_overlay.scatter(kp_full[visible, 0], kp_full[visible, 1], c='lime', s=20, marker='o')
+        ax_overlay.scatter(kp_display[:, 0], kp_display[:, 1], c='lime', s=20, marker='o')
     ax_overlay.set_title("Image + mask (red=valid) + keypoints (green)")
     ax_overlay.axis('off')
 

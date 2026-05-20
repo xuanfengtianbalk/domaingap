@@ -35,57 +35,16 @@ def load_config(config_path):
 def build_dataset(config, split, aug_type='none', padded=False):
     """根据配置构建数据集，split可以是'train'/'val'/'test'"""
     dataset_config = config['DATASET']
-    transform_list = []
-    # for t in dataset_config.get('transform', []):
-    #     if t['type'] == 'Resize':
-    #         transform_list.append(transforms.Resize(t['size']))
-    #     elif t['type'] == 'ToTensor':
-    #         transform_list.append(transforms.ToTensor())
-    #     elif t['type'] == 'Normalize':
-    #         transform_list.append(transforms.Normalize(t['mean'], t['std']))
-    #     # 可根据需要添加更多变换
-    # transform = transforms.Compose(transform_list)
-    IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
-    IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
     if dataset_config['NAME'] == 'speedplus':
-        import albumentations as A
+        from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
         if split == 'train':
-            if aug_type != 'none':
-                from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-                trans = SpaceAugTransform(aug_type,
-                    styleaug_p=config['TRAIN'].get('STYLEAUG_P', 0.5),
-                    styleaug_alpha=config['TRAIN'].get('STYLEAUG_ALPHA', 0.3))
-            else:
-                T = [
-                    A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
-                ]
-                trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
-                                                                      remove_invisible=False),
-                                  additional_targets={
-                                      'mask': 'mask',
-                                      'coors': 'mask'
-                                  })
-        elif split == 'validation':
-            T = [
-                A.Normalize(mean=IMAGENET_DEFAULT_MEAN,std=IMAGENET_DEFAULT_STD)
-            ]  # transforms
-            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
-                                                                  remove_invisible=False),
-                              additional_targets={
-                                  'mask': 'mask',  # 将 'mask' 映射到默认的 mask 处理
-                                  'coors': 'mask'  # 将 'coors' 也按照 mask 的规则处理
-                              }
-                              )
+            trans = SpaceAugTransform(aug_type,
+                styleaug_p=config['TRAIN'].get('STYLEAUG_P', 0.5),
+                styleaug_alpha=config['TRAIN'].get('STYLEAUG_ALPHA', 0.3))
         else:
-            T = [
-                # A.Resize(height=cfg['MODEL']['IMAGE_SIZE'][1], width=cfg['MODEL']['IMAGE_SIZE'][0], always_apply=True),
-                # ToTensorV2(p=1),
-                A.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
-            ]  # transforms
-            trans = A.Compose(T, keypoint_params=A.KeypointParams(format='xy',
-                                                                  remove_invisible=False),
-                              # bbox_params=A.BboxParams(format='pascal_voc')
-                              )
+            trans = SpaceAugTransform('none',
+                styleaug_p=0, styleaug_alpha=0)
 
         dataset = PyTorchSatellitePoseEstimationDataset(split=split, speed_root=dataset_config['train_root_dir'], points=points,
                                                                transform=trans, padded=padded)
@@ -360,7 +319,7 @@ class Criterion:
 def parse_args():
     """示例参数解析器，使用 parse_known_args 捕获未知参数用于覆盖配置。"""
     parser = argparse.ArgumentParser(description="Run training/visualization/testing based on config.")
-    parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox', 'evaluate'],
+    parser.add_argument('--mode', default='train', choices=['train', 'visualization', 'sunlamp', 'lightbox', 'evaluate', 'validation'],
                         help='Task to execute: train, visualization, sunlamp, lightbox, or evaluate')
     parser.add_argument('--config', type=str, default='configs/cfg.yaml',
                         help='Path to configuration file (YAML)')
@@ -463,6 +422,9 @@ def main():
         # 可视化可以使用任意split，比如'train'或'val'，根据需要
         vis_dataset = build_dataset(config, 'lightbox')
         vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
+    elif args.mode == 'validation':
+        vis_dataset = build_dataset(config, 'validation')
+        vis_loader = DataLoader(vis_dataset, batch_size=1, shuffle=False, num_workers=1)
     elif args.mode == 'evaluate':
         pass  # dataset built inside evaluate handler
     else:  # test
@@ -543,7 +505,7 @@ def main():
                     json.dump(data, f)
             print(f'{mode} eval saved to {end_path_name}/')
 
-    elif args.mode == 'sunlamp' or args.mode == 'lightbox':
+    elif args.mode == 'sunlamp' or args.mode == 'lightbox' or args.mode == 'validation':
         # 可视化示例：显示几个预测结果
         import matplotlib.pyplot as plt
         model.eval()

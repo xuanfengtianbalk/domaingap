@@ -25,12 +25,11 @@ class SpaceAugTransform:
         trans = SpaceAugTransform('aug4')
         result = trans(image=img, keypoints=kp, mask=mask, coors=coors)
     """
-    def __init__(self, aug_type='aug1', styleaug_alpha=0.3, styleaug_p=0.5, normalize=True, to_gray=True):
+    def __init__(self, aug_type='aug1', styleaug_alpha=0.3, styleaug_p=0.5, normalize=True, to_gray=None):
         self.aug_type = aug_type
         self.styleaug_alpha = styleaug_alpha
         self.styleaug_p = styleaug_p
         self.normalize = normalize
-        self.to_gray = to_gray
         self._use_styleaug = aug_type in ('styleaug', 'augmix', 'aug4s')
         self._pipeline = self._build()
 
@@ -137,11 +136,6 @@ class SpaceAugTransform:
             with torch.no_grad():
                 x = _get_stylaug()(x, alpha=self.styleaug_alpha)
             result['image'] = x.squeeze(0).permute(1,2,0).mul(255).clamp(0,255).byte().cpu().numpy()
-
-        # Convert to grayscale (3 identical channels, 0-255)
-        if self.to_gray:
-            gray = result['image'].mean(axis=-1, keepdims=True).astype(np.uint8)
-            result['image'] = np.repeat(gray, 3, axis=-1)
 
         # Apply Normalize (same as original train transform)
         if self.normalize:
