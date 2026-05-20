@@ -703,15 +703,6 @@ if has_pytorch:
             target_dict["padded_ratio"] = padded_ratio
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
 
-            if self.split == 'train':
-                cx = (x1 + x2) // 2
-                cy = (y1 + y2) // 2
-                size = max(x2 - x1, y2 - y1)
-                x1 = cx - size // 2
-                y1 = cy - size // 2
-                x2 = cx + size // 2
-                y2 = cy + size // 2
-
             # --- crop + resize image to 256x256 ---
             H, W = ymax, xmax
             cx1, cy1 = max(x1, 0), max(y1, 0)
@@ -774,10 +765,10 @@ if has_pytorch:
             for x, y, v in kp:
                 if self.split == 'train':
                     in_bounds = x > 0 and y > 0 and x < 256 and y < 256
-                    keypoints.append([x, y, v if in_bounds else 0])
+                    keypoints.append([x, y, 1 if in_bounds else 0])
                 else:
                     in_bounds = x > 0 and y > 0 and x < (x2 - x1) and y < (y2 - y1)
-                    keypoints.append([x, y, v if in_bounds else 0])
+                    keypoints.append([x, y, 1 if in_bounds else 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
             k = torch.reshape(k, (-1, 3))
 
@@ -1146,7 +1137,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     # ---------- 子图1: 原始图像 + 关键点 ----------
     ax_img.imshow(img)
     if visible.any():
-        ax_img.scatter(kp_display[:, 0], kp_display[:, 1], c='red', s=20, marker='o', label='keypoints')
+        ax_img.scatter(kp_display[visible, 0], kp_display[visible, 1], c='red', s=20, marker='o', label='keypoints')
     ax_img.set_title(f"Image with keypoints (index {idx})")
     ax_img.axis('off')
     ax_img.legend()
@@ -1197,7 +1188,7 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     img_overlay = img_overlay * 0.6 + mask_rgb * 0.4
     ax_overlay.imshow(img_overlay)
     if visible.any():
-        ax_overlay.scatter(kp_display[:, 0], kp_display[:, 1], c='lime', s=20, marker='o')
+        ax_overlay.scatter(kp_display[visible, 0], kp_display[visible, 1], c='lime', s=20, marker='o')
     ax_overlay.set_title("Image + mask (red=valid) + keypoints (green)")
     ax_overlay.axis('off')
 

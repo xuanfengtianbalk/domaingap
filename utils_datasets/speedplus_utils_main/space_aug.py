@@ -45,7 +45,7 @@ class SpaceAugTransform:
             import cv2
             return A.Compose([
                 A.RandomBrightnessContrast(p=1),
-                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+                A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1,
                                    border_mode=cv2.BORDER_CONSTANT, fill=0),
                 A.OneOf([A.GaussNoise()], p=0.5),
                 A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
