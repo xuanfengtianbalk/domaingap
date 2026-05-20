@@ -13,3 +13,5 @@ visuals/
 *.sh
 *.log
 *.png
+AGENTS.md
+*.bak
