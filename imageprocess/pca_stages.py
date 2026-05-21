@@ -96,7 +96,7 @@ if __name__ == '__main__':
     random.shuffle(all_images)
 
     ds = PyTorchSatellitePoseEstimationDataset(split='validation', speed_root=DATASET_DIR, points=body_points)
-    trans = SpaceAugTransform(args.aug_type, styleaug_p=0.0, normalize=False, to_gray=True)
+    trans = SpaceAugTransform(args.aug_type, styleaug_p=0.0, to_gray=True)
     norm = A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
     selected = all_images[:args.m]

@@ -66,7 +66,7 @@ if __name__ == '__main__':
         axes[0].imshow(resized); axes[0].set_title(f'Crop 256x256\n[{x1},{y1},{x2},{y2}]', fontsize=6); axes[0].axis('off')
 
         for j, at in enumerate(aug_types):
-            trans = SpaceAugTransform(at, styleaug_p=1.0, normalize=False, to_gray=True)
+            trans = SpaceAugTransform(at, styleaug_p=1.0, to_gray=True)
             result = trans(image=resized.copy())
             axes[j+1].imshow(result['image'])
             axes[j+1].set_title(at, fontsize=6); axes[j+1].axis('off')

@@ -5,6 +5,7 @@ def train_one_epoch(model, dataloader, model_type, criterion, optimizer, schedul
     losses_epoch = []
     pbar = tqdm(dataloader, desc="Training", ncols=80)
     for idx, (samples, targets) in enumerate(pbar):
+        model.zero_grad()
         target_list = []
         for i in range(samples.shape[0]):
             target_list.append({k: targets[k][i].to(device) for k in targets.keys()})

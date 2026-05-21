@@ -25,11 +25,13 @@ class SpaceAugTransform:
         trans = SpaceAugTransform('aug4')
         result = trans(image=img, keypoints=kp, mask=mask, coors=coors)
     """
-    def __init__(self, aug_type='aug1', styleaug_alpha=0.3, styleaug_p=0.5, normalize=True, to_gray=None):
+    def __init__(self, aug_type='aug1', styleaug_alpha=0.3, styleaug_p=0.5, to_gray=None):
         self.aug_type = aug_type
         self.styleaug_alpha = styleaug_alpha
         self.styleaug_p = styleaug_p
-        self.normalize = normalize
+        self.IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
+        self.IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+        self.norm = A.Normalize(mean=self.IMAGENET_DEFAULT_MEAN, std=self.IMAGENET_DEFAULT_STD)
         self._use_styleaug = aug_type in ('styleaug', 'augmix', 'aug4s')
         self._pipeline = self._build()
 
@@ -37,7 +39,7 @@ class SpaceAugTransform:
         """Build the albumentations part of the pipeline."""
         t = self.aug_type.lower()
         if t in ('none', 'styleaug'):
-            return A.Compose([],
+            return A.Compose([self.norm],
                              keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                              additional_targets={'mask': 'mask', 'coors': 'mask'})
 
@@ -45,14 +47,14 @@ class SpaceAugTransform:
             import cv2
             return A.Compose([
                 A.RandomBrightnessContrast(p=1),
-                A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1,
-                                   border_mode=cv2.BORDER_CONSTANT, fill=0),
+                # A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=45, p=1,
+                #                    border_mode=cv2.BORDER_CONSTANT, fill=0),
                 A.OneOf([A.GaussNoise()], p=0.5),
                 A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
                          A.Blur(blur_limit=3, p=0.5)], p=1),
-                A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
-                                 num_flare_circles_range=(1, 2), p=1.0),
-            ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+                # A.RandomSunFlare(flare_roi=(0, 0, 1, 1), src_radius=400,
+                #                  num_flare_circles_range=(1, 2), p=1.0),
+            ] + [self.norm], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                 additional_targets={'mask': 'mask', 'coors': 'mask'})
 
         # Incremental aug levels
@@ -81,6 +83,7 @@ class SpaceAugTransform:
             augs += aug3_add
         if t in ('aug4', 'aug4s', 'aug5', 'augmix'):
             augs += aug4_add
+        augs += [self.norm]
 
         if t in ('aug5', 'augmix'):
             return self._augmix()
@@ -106,7 +109,7 @@ class SpaceAugTransform:
         g_general = A.Compose([
             A.SomeOf([A.CoarseDropout(num_holes_range=(1,8),p=1),A.PixelDropout(0.02,p=1),
                        A.Superpixels(p_replace=0.1,n_segments=100,p=1)],n=2,p=1)],p=1)
-        return A.Compose([g_brightness,g_blur,g_corrupt,g_general],
+        return A.Compose([g_brightness,g_blur,g_corrupt,g_general, self.norm],
                          keypoint_params=A.KeypointParams(format='xy',remove_invisible=False),
                          additional_targets={'mask':'mask','coors':'mask'})
 
@@ -136,9 +139,5 @@ class SpaceAugTransform:
             with torch.no_grad():
                 x = _get_stylaug()(x, alpha=self.styleaug_alpha)
             result['image'] = x.squeeze(0).permute(1,2,0).mul(255).clamp(0,255).byte().cpu().numpy()
-
-        # Apply Normalize (same as original train transform)
-        if self.normalize:
-            result['image'] = A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225))(image=result['image'])['image']
 
         return result

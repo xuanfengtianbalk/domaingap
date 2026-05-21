@@ -1273,11 +1273,11 @@ if __name__ == "__main__":
     #                       'coors': 'mask'
     #                   })
     from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-    trans = SpaceAugTransform('augbaseline')
+    trans = SpaceAugTransform('none')
 
     # 创建 dataset 实例
     dataset = PyTorchSatellitePoseEstimationDataset(
-        split='train',
+        split='validation',
         speed_root=dataset_config['train_root_dir'],
         points=points,
         transform=trans,
