@@ -702,9 +702,28 @@ if has_pytorch:
             b, padded_ratio = self.calculate_boxes_and_padded(torch.tensor(kp_orig, dtype=torch.float32), padded=self.padded)
             target_dict["padded_ratio"] = padded_ratio
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+            # save original bbox for output PnP
+            x1_o, y1_o, x2_o, y2_o = x1, y1, x2, y2
+            H_o, W_o = ymax, xmax
+
+            is_aug = hasattr(self.transform, 'is_augmented') and self.transform.is_augmented
+            H, W = ymax, xmax
+
+            # --- pre-crop: resize + pixel-only augmentations ---
+            if is_aug:
+                rs_w, rs_h = 480, 300
+                rs_scale = rs_w / W_o
+                np_image = cv2.resize(np_image, (rs_w, rs_h), interpolation=cv2.INTER_LINEAR)
+                if hasattr(self.transform, 'apply_pre'):
+                    np_image = self.transform.apply_pre(np_image)
+                x1 = int(x1 * rs_scale); y1 = int(y1 * rs_scale)
+                x2 = int(x2 * rs_scale); y2 = int(y2 * rs_scale)
+                for i in range(len(kp)):
+                    kp[i][0] *= rs_scale
+                    kp[i][1] *= rs_scale
+                H, W = rs_h, rs_w
 
             # --- crop + resize image to 256x256 ---
-            H, W = ymax, xmax
             cx1, cy1 = max(x1, 0), max(y1, 0)
             cx2, cy2 = min(x2, W), min(y2, H)
             cropped_img = np_image[cy1:cy2, cx1:cx2]
@@ -716,7 +735,7 @@ if has_pytorch:
             resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
 
             # --- adjust keypoints ---
-            if self.split == 'train':
+            if is_aug:
                 scale_kp_x = 256.0 / (x2 - x1)
                 scale_kp_y = 256.0 / (y2 - y1)
                 kp_trans = []
@@ -731,39 +750,42 @@ if has_pytorch:
                     ny = y - y1
                     kp_trans.append([nx, ny, v])
 
-            # --- get coors/mask, crop+resize, then apply transforms ---
+            # --- get coors/mask, crop with original bbox, resize to 256 ---
             if self.split == 'train' or self.split == 'validation':
                 depth_path = os.path.join(self.depth_root, sample_id[:-4] + '0001.exr')
                 coors = self.get_coors(depth_path, pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
                 mask = np.all(np.isfinite(coors), axis=0)
-
-                coors_crop = coors[:, cy1:cy2, cx1:cx2]
-                mask_crop = mask[cy1:cy2, cx1:cx2]
+                cx1_o = max(x1_o, 0); cx2_o = min(x2_o, W_o)
+                cy1_o = max(y1_o, 0); cy2_o = min(y2_o, H_o)
+                coors_crop = coors[:, cy1_o:cy2_o, cx1_o:cx2_o]
+                mask_crop = mask[cy1_o:cy2_o, cx1_o:cx2_o]
                 if self.padded:
-                    if p_top or p_bottom or p_left or p_right:
-                        coors_crop = np.pad(coors_crop, ((0,0),(p_top,p_bottom),(p_left,p_right)), constant_values=np.nan)
-                        mask_crop = np.pad(mask_crop, ((p_top,p_bottom),(p_left,p_right)), constant_values=0)
+                    p_top_o, p_bottom_o = max(0, -y1_o), max(0, y2_o - H_o)
+                    p_left_o, p_right_o = max(0, -x1_o), max(0, x2_o - W_o)
+                    if p_top_o or p_bottom_o or p_left_o or p_right_o:
+                        coors_crop = np.pad(coors_crop, ((0,0),(p_top_o,p_bottom_o),(p_left_o,p_right_o)), constant_values=np.nan)
+                        mask_crop = np.pad(mask_crop, ((p_top_o,p_bottom_o),(p_left_o,p_right_o)), constant_values=0)
                 coors_resized = np.transpose(cv2.resize(
                     np.transpose(coors_crop, (1, 2, 0)), (256, 256),
                     interpolation=cv2.INTER_NEAREST), (2, 0, 1))
                 mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
                                           interpolation=cv2.INTER_NEAREST)
 
-                trans_image = self.transform(image=resized_img, keypoints=kp_trans,
-                                             mask=mask_resized.astype(np.uint8),
-                                             coors=np.transpose(coors_resized, (1, 2, 0)))
+                trans_image = self.transform.apply_post(image=resized_img, keypoints=kp_trans,
+                                                         mask=mask_resized.astype(np.uint8),
+                                                         coors=np.transpose(coors_resized, (1, 2, 0)))
                 kp = trans_image['keypoints']
                 new_mask = trans_image['mask'].T
                 new_coors = np.transpose(trans_image['coors'], (2, 1, 0))
                 target_dict["coors_gt"] = torch.tensor(new_coors)
                 target_dict["mask_gt"] = torch.tensor(new_mask)
             else:
-                trans_image = self.transform(image=resized_img, keypoints=kp_trans)
+                trans_image = self.transform.apply_post(image=resized_img, keypoints=kp_trans)
                 kp = trans_image['keypoints']
 
             keypoints = []
             for x, y, v in kp:
-                if self.split == 'train':
+                if self.split == 'train' or is_aug:
                     in_bounds = x > 0 and y > 0 and x < 256 and y < 256
                     keypoints.append([x, y, 1 if in_bounds else 0])
                 else:
@@ -772,12 +794,11 @@ if has_pytorch:
             k = torch.tensor(keypoints, dtype=torch.float32)
             k = torch.reshape(k, (-1, 3))
 
-            # --- store bbox for PnP, imageshape for loss ---
-            b = torch.tensor([x1, y1, x2, y2], dtype=torch.float32).reshape(1, 4)
+            b = torch.tensor([x1_o, y1_o, x2_o, y2_o], dtype=torch.float32).reshape(1, 4)
             if self.split == 'train':
                 target_dict["imageshape"] = torch.tensor([256, 256])
             else:
-                target_dict["imageshape"] = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
+                target_dict["imageshape"] = torch.tensor([x2_o - x1_o, y2_o - y1_o], dtype=torch.float32)
 
             trans = self.to_tensor
             tt = trans(image=trans_image['image'])
@@ -1118,9 +1139,8 @@ def visualize_dataset_sample(dataset, idx, save_path=None, coord_mode='channels'
     if imageshape is not None and imageshape[0].item() == 256:
         kp_display = kp_full.copy()
     else:
-        gtbbox = target_dict["boxes"].squeeze(0).cpu().numpy()
-        crop_w = gtbbox[2] - gtbbox[0]
-        crop_h = gtbbox[3] - gtbbox[1]
+        crop_w = imageshape[0].item()
+        crop_h = imageshape[1].item()
         kp_display = kp_full.copy()
         kp_display[:, 0] = kp_full[:, 0] * 256.0 / crop_w
         kp_display[:, 1] = kp_full[:, 1] * 256.0 / crop_h
@@ -1273,11 +1293,11 @@ if __name__ == "__main__":
     #                       'coors': 'mask'
     #                   })
     from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-    trans = SpaceAugTransform('none')
+    trans = SpaceAugTransform('augbaseline')
 
     # 创建 dataset 实例
     dataset = PyTorchSatellitePoseEstimationDataset(
-        split='validation',
+        split='train',
         speed_root=dataset_config['train_root_dir'],
         points=points,
         transform=trans,

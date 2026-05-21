@@ -32,7 +32,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def build_dataset(config, split, aug_type='none', padded=False):
+def build_dataset(config, split, aug_type='none', padded=True):
     """根据配置构建数据集，split可以是'train'/'val'/'test'"""
     dataset_config = config['DATASET']
 
@@ -42,6 +42,9 @@ def build_dataset(config, split, aug_type='none', padded=False):
             trans = SpaceAugTransform(aug_type,
                 styleaug_p=config['TRAIN'].get('STYLEAUG_P', 0.5),
                 styleaug_alpha=config['TRAIN'].get('STYLEAUG_ALPHA', 0.3))
+        elif aug_type != 'none':
+            trans = SpaceAugTransform(aug_type,
+                styleaug_p=0, styleaug_alpha=0)
         else:
             trans = SpaceAugTransform('none',
                 styleaug_p=0, styleaug_alpha=0)
