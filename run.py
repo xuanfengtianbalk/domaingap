@@ -50,7 +50,8 @@ def build_dataset(config, split, aug_type='none', padded=True):
                 styleaug_p=0, styleaug_alpha=0)
 
         dataset = PyTorchSatellitePoseEstimationDataset(split=split, speed_root=dataset_config['train_root_dir'], points=points,
-                                                               transform=trans, padded=padded)
+                                                               transform=trans, padded=padded,
+                                                               use_convex_hull=config['TRAIN'].get('USE_CONVEX_HULL', True))
 
     return dataset
 

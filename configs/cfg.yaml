@@ -28,6 +28,7 @@ TRAIN:
   MIXSTYLE: false  # MixStyle domain generalization (default off)
   MIXSTYLE_P: 0.5
   MIXSTYLE_ALPHA: 0.1
+  USE_CONVEX_HULL: true  # use convex hull for keypoint visibility (default on)
 
 TEST:
   SAVE_DIR: 'test'

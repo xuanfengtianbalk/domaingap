@@ -7,6 +7,7 @@ import cv2
 from tqdm import tqdm
 
 import numpy as np
+from post_process import mask_to_display
 from Hyperpose_net.losses.kp_loss import heatmaps_to_keypoints
 
 # ------------------ 通用可视化函数 ------------------
@@ -166,8 +167,11 @@ def eval_one_epoch_visualization(
                     paste_img = cv2.resize(np.clip(crop_img * 255, 0, 255).astype(np.uint8),
                                            (int(crop_w), int(crop_h)))
                     x1, y1 = int(gt_bbox[0]), int(gt_bbox[1])
-                    x2, y2 = x1 + int(crop_w), y1 + int(crop_h)
-                    canvas[y1:y2, x1:x2] = paste_img.astype(np.float32) / 255.0
+                    cx1, cy1 = max(x1, 0), max(y1, 0)
+                    cx2, cy2 = min(x1 + int(crop_w), 1920), min(y1 + int(crop_h), 1200)
+                    px1, py1 = cx1 - x1, cy1 - y1
+                    px2, py2 = px1 + (cx2 - cx1), py1 + (cy2 - cy1)
+                    canvas[cy1:cy2, cx1:cx2] = paste_img[py1:py2, px1:px2].astype(np.float32) / 255.0
 
                     fig, ax = plt.subplots(figsize=(12, 8))
                     ax.imshow(canvas)
@@ -192,14 +196,14 @@ def eval_one_epoch_visualization(
                 if 'coordinates' in model_type:
                     # 坐标回归分支：预测的坐标图
                     coord_map = outputs['coordinates'][b]  # 假设形状 (C, H, W) 或 (H, W, C)
-                    # print(coord_map.shape)
+                    print(coord_map.shape)
                     mask_logits = outputs['mask'][b]       # 形状 (1, H, W) 或 (H, W)
                     # print(mask_logits.shape)
                     mask_bool = activate(mask_logits) > 0.5
 
                     # 将坐标图转为通道在最后一维的 numpy
                     if coord_map.dim() == 3 and coord_map.shape[0] == 3:
-                        coord_np = coord_map.cpu().permute(1, 2, 0).numpy()
+                        coord_np = coord_map.cpu().permute(2, 1, 0).numpy()
                     else:
                         coord_np = coord_map.cpu().numpy()  # 可能 (H,W,3) 或 (H,W,1)
                     # 归一化显示前三个通道
@@ -217,7 +221,7 @@ def eval_one_epoch_visualization(
                     axes[1].set_title('Predicted Coordinates')
                     axes[1].axis('off')
 
-                    axes[2].imshow(mask_bool.cpu().numpy()[0], cmap='gray')
+                    axes[2].imshow(mask_to_display(mask_bool.cpu()), cmap='gray')
                     axes[2].set_title('Mask')
                     axes[2].axis('off')
                     # plt.show()

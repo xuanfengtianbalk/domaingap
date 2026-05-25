@@ -9,7 +9,7 @@ from Hyperpose_net.losses.kp_loss import heatmaps_to_keypoints
 import math
 import cv2
 from cv2 import solvePnP, solvePnPRansac
-from post_process import pose_calculats_from_coors, pose_calculats_from_kps, compute_pose_error
+from post_process import pose_calculats_from_coors, pose_calculats_from_kps, compute_pose_error, to_pnp_coors, coors_gs_to_pnp
 
 def valid_one_epoch(model, dataloader, model_type, criterion, device):
     model.eval()
@@ -106,7 +106,7 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
                 mask_bool_est = mask_bool_est_.expand_as(coormap_masked).cpu()
                 coormap_masked[~mask_bool_est] = float('nan')
                 print('test of coordinates')
-                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K,coormap_masked.squeeze().permute(2,1,0).cpu().detach().numpy(), gtbbox.cpu().detach().numpy())
+                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, to_pnp_coors(coormap_masked.squeeze()), gtbbox.cpu().detach().numpy())
 
                 err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(
                     coors_qvecs, coors_tvecs, qgt, rgt, is_true
@@ -131,7 +131,7 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None)
                     mask_bool_est = mask_bool_est_.expand_as(coormap_value).cpu()
                     coormap_value[~mask_bool_est] = float('nan')
                 print('test of coordinates_gs')
-                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, coormap_value.squeeze().permute(2,1,0).cpu().numpy(), gtbbox.cpu().numpy())
+                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, to_pnp_coors(coormap_value.squeeze()), gtbbox.cpu().numpy())
                 err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(
                     coors_qvecs, coors_tvecs, qgt, rgt, is_true)
                 result_dict = {'err_ori': err_ori_deg.tolist(), 'los_r': err_r_abs.tolist()}

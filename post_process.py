@@ -3,6 +3,19 @@ import numpy as np
 from numpy import sin, cos, sqrt
 import cv2
 from cv2 import solvePnP, solvePnPRansac
+
+
+def mask_to_display(mask_tensor):  # (W,H) -> (H,W)
+    return mask_tensor.cpu().numpy().T
+
+def to_pnp_coors(tensor):  # (C,W,H) -> (H,W,C)
+    return tensor.permute(2, 1, 0).cpu().detach().numpy()
+
+def to_pnp_coors_np(arr):  # (C,W,H) -> (W,H,C)
+    return np.transpose(arr, (1, 2, 0))
+
+def coors_gs_to_pnp(array):  # (H,W,3) -> (W,H,3)
+    return np.transpose(array, (1, 0, 2))
 from math_.q_ import quatProduct
 import math
 def rotation_matrix_to_quaternion(r1, r2, r3):
@@ -111,24 +124,17 @@ def pose_calculats_from_coors(cam_K, coors, gtbbox):
     image_points = []
     resize_H, resize_W, _ = coors.shape
 
-    # 从 gtbbox 提取必要信息
     x_min, y_min = gtbbox[0], gtbbox[1]
     crop_orig_W = gtbbox[2] - gtbbox[0]
     crop_orig_H = gtbbox[3] - gtbbox[1]
-    # 缩放因子（可能不等比例）
     scale_x = resize_W / crop_orig_W
     scale_y = resize_H / crop_orig_H
 
-
     for u in range(resize_W):
         for v in range(resize_H):
-            # 提取有效像素点，忽略无效点（如NaN）
-            if not np.isnan(coors[v, u, 0]):  # 如果3D坐标有效
-                # 提取3D坐标
+            if not np.isnan(coors[v, u, 0]):
                 x, y, z = coors[v, u, :3]
                 object_points.append([x, y, z])
-
-                # 坐标映射：resize坐标 → 原图坐标
                 u_crop = u / scale_x
                 v_crop = v / scale_y
                 u_orig = u_crop + x_min

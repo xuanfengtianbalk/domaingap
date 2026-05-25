@@ -8,7 +8,7 @@ sys.path.insert(0, '/opt/dl_workspace/algorithm/04-myself/domaingap')
 import torch
 from tqdm import tqdm
 from run import load_config, build_dataset
-from post_process import pose_calculats_from_kps, pose_calculats_from_coors, compute_pose_error
+from post_process import pose_calculats_from_kps, pose_calculats_from_coors, compute_pose_error, to_pnp_coors
 from utils_datasets.speedplus_utils_main.utils import points, Camera
 
 
@@ -23,21 +23,13 @@ def test_kps(loader, aug_type, n_max=500):
             kp = targets["keypoints"][i].squeeze(0).cpu().numpy()
             gtbbox = targets["boxes"][i].squeeze(0).cpu().numpy()
             imageshape = targets.get("imageshape")
-            # crop_w = gtbbox[2] - gtbbox[0]
-            # crop_h = gtbbox[3] - gtbbox[1]
-            # print(imageshape)
-            # print(crop_w, crop_h)
-
-            if aug_type != 'none':
+            crop_w = gtbbox[2] - gtbbox[0]
+            crop_h = gtbbox[3] - gtbbox[1]
+            if imageshape is not None:
                 imw = imageshape.reshape(-1)[0].item()
                 imh = imageshape.reshape(-1)[1].item()
-                # if imw!=crop_w:
-                #     print('err:', imw-crop_w)
-                # if imw != crop_w:
-                #     print('err:', imh - crop_h)
-
-                kp[:, 0] = kp[:, 0] * imw / 256 + gtbbox[0]
-                kp[:, 1] = kp[:, 1] * imh / 256 + gtbbox[1]
+                kp[:, 0] = kp[:, 0] * crop_w / imw + gtbbox[0]
+                kp[:, 1] = kp[:, 1] * crop_h / imh + gtbbox[1]
             else:
                 kp[:, 0] += gtbbox[0]
                 kp[:, 1] += gtbbox[1]
@@ -78,7 +70,7 @@ def test_coords(loader, aug_type, n_max=200):
             mask = mask.expand_as(coors)
             coors[~mask] = float('nan')
 
-            coors = coors.permute(2, 1, 0).cpu().detach().numpy()
+            coors = to_pnp_coors(coors)
             bbox_np = gtbbox.cpu().numpy()
             is_true, qv, tv = pose_calculats_from_coors(Camera.K, coors, bbox_np)
             e_ori, _, e_r, _, fail, good = compute_pose_error(qv, tv, q_gt, r_gt, is_true)
@@ -124,7 +116,7 @@ def test_coords_gs(loader, aug_type, n_max=200):
             mask = mask.expand_as(coors)
             coors[~mask] = float('nan')
 
-            coors = coors.permute(2, 1, 0).cpu().detach().numpy()
+            coors = to_pnp_coors(coors)
             bbox_np = gtbbox.cpu().numpy()
             is_true, qv, tv = pose_calculats_from_coors(Camera.K, coors, bbox_np)
             e_ori, _, e_r, _, fail, good = compute_pose_error(qv, tv, q_gt, r_gt, is_true)
@@ -150,8 +142,8 @@ def test_coords_gs(loader, aug_type, n_max=200):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--aug', type=str, nargs='+', default=['none'])#,'augbaseline' none
-    parser.add_argument('--mode', type=str, default='validation')
+    parser.add_argument('--aug', type=str, nargs='+', default=['augbaseline'])#,'augbaseline' none
+    parser.add_argument('--mode', type=str, default='train')
     args = parser.parse_args()
 
 

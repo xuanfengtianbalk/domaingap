@@ -29,35 +29,33 @@ class SpaceAugTransform:
         self.norm = A.Normalize(mean=self.IMAGENET_DEFAULT_MEAN, std=self.IMAGENET_DEFAULT_STD)
         self._use_styleaug = aug_type in ('styleaug', 'augmix', 'aug4s')
         self.is_augmented = aug_type.lower() not in ('none', 'styleaug')
-        self._pre_pipeline, self._post_pipeline = self._build()
+        self._pipeline = self._build()
+
+    def apply_norm(self, image):
+        return self.norm(image=image)['image']
 
     def _build(self):
         t = self.aug_type.lower()
 
         if t in ('none', 'styleaug'):
-            return (None, A.Compose([self.norm],
-                keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
-                additional_targets={'mask': 'mask', 'coors': 'mask'}))
+            return A.Compose([],
+                             keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+                             additional_targets={'mask': 'mask', 'coors': 'mask'})
 
-        # --- augbaseline ---
         if t == 'augbaseline':
             import cv2
-            pre = A.Compose([
+            return A.Compose([
+                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+                                   border_mode=cv2.BORDER_CONSTANT, fill=0),
                 A.RandomBrightnessContrast(p=1),
                 A.OneOf([A.GaussNoise()], p=0.5),
                 A.RandomSunFlare(flare_roi=(0,0,1,1), src_radius=400, num_flare_circles_range=(1,2), p=0.5),
-                A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5), A.Blur(blur_limit=3, p=0.5)], p=1),
-            ])
-            post = A.Compose([
-                A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
-                                   border_mode=cv2.BORDER_CONSTANT, fill=0),
-                self.norm,
+                A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
+                         A.Blur(blur_limit=3, p=0.5)], p=1),
             ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
                 additional_targets={'mask': 'mask', 'coors': 'mask'})
-            return (pre, post)
 
-        # --- incremental aug levels ---
-        pre_augs = [
+        augs = [
             A.GaussNoise((0.01,0.05),p=0.5),
             A.CoarseDropout(num_holes_range=(1,8),p=0.5),
             A.RandomBrightnessContrast(contrast_limit=0.3,brightness_limit=0,p=0.5),
@@ -68,23 +66,20 @@ class SpaceAugTransform:
             A.Sharpen(p=0.5),
             A.Emboss(p=0.5),
         ]
+        aug2 = [A.Superpixels(p_replace=0.1,n_segments=100,p=0.5), A.CLAHE(clip_limit=2.0,tile_grid_size=(8,8),p=0.5), A.PixelDropout(0.02,p=0.5)]
+        aug3 = [A.ISONoise(p=0.5), A.RandomFog(0.2,p=0.5), A.RandomSnow(0.2,p=0.5), A.RandomSunFlare((0,0,1,1),src_radius=400,p=0.5), A.RandomBrightnessContrast(contrast_limit=0.5,brightness_limit=0,p=0.5)]
+        aug4 = [A.ColorJitter(brightness=0.3,contrast=0.3,saturation=0.3,hue=0.1,p=0.5), A.HueSaturationValue(20,30,20,p=0.5)]
 
-        pre2 = [A.Superpixels(p_replace=0.1,n_segments=100,p=0.5), A.CLAHE(clip_limit=2.0,tile_grid_size=(8,8),p=0.5), A.PixelDropout(0.02,p=0.5)]
-        pre3 = [A.ISONoise(p=0.5), A.RandomFog(0.2,p=0.5), A.RandomSnow(0.2,p=0.5), A.RandomSunFlare((0,0,1,1),src_radius=400,p=0.5), A.RandomBrightnessContrast(contrast_limit=0.5,brightness_limit=0,p=0.5)]
-        pre4 = [A.ColorJitter(brightness=0.3,contrast=0.3,saturation=0.3,hue=0.1,p=0.5), A.HueSaturationValue(20,30,20,p=0.5)]
+        if t in ('aug2','aug3','aug4','aug4s','aug5','augmix'): augs += aug2
+        if t in ('aug3','aug4','aug4s','aug5','augmix'): augs += aug3
+        if t in ('aug4','aug4s','aug5','augmix'): augs += aug4
 
-        if t in ('aug2', 'aug3', 'aug4', 'aug4s', 'aug5', 'augmix'): pre_augs += pre2
-        if t in ('aug3', 'aug4', 'aug4s', 'aug5', 'augmix'): pre_augs += pre3
-        if t in ('aug4', 'aug4s', 'aug5', 'augmix'): pre_augs += pre4
-
-        if t in ('aug5', 'augmix'):
+        if t in ('aug5','augmix'):
             return self._augmix()
 
-        pre = A.Compose(pre_augs) if pre_augs else None
-        post = A.Compose([self.norm],
+        return A.Compose(augs,
             keypoint_params=A.KeypointParams(format='xy',remove_invisible=False),
             additional_targets={'mask':'mask','coors':'mask'})
-        return (pre, post)
 
     def _augmix(self):
         g_brightness = A.Compose([
@@ -103,23 +98,20 @@ class SpaceAugTransform:
         g_general = A.Compose([
             A.SomeOf([A.CoarseDropout(num_holes_range=(1,8),p=1),A.PixelDropout(0.02,p=1),
                        A.Superpixels(p_replace=0.1,n_segments=100,p=1)],n=2,p=1)],p=1)
-        pre = A.Compose([g_brightness, g_corrupt, g_general, g_blur])
-        post = A.Compose([self.norm],
+        return A.Compose([g_brightness,g_blur,g_corrupt,g_general],
             keypoint_params=A.KeypointParams(format='xy',remove_invisible=False),
             additional_targets={'mask':'mask','coors':'mask'})
-        return (pre, post)
 
-    def apply_pre(self, image):
-        if self._pre_pipeline is not None:
-            return self._pre_pipeline(image=image)['image']
-        return image
-
-    def apply_post(self, image, keypoints=None, mask=None, coors=None):
+    def __call__(self, **kwargs):
+        image = kwargs.get('image')
+        keypoints = kwargs.get('keypoints')
+        mask = kwargs.get('mask')
+        coors = kwargs.get('coors')
         args = {'image': image}
         if keypoints is not None: args['keypoints'] = keypoints
         if mask is not None: args['mask'] = mask
         if coors is not None: args['coors'] = coors
-        result = self._post_pipeline(**args)
+        result = self._pipeline(**args)
         if self._use_styleaug and np.random.rand() < self.styleaug_p:
             img_np = result['image']
             x = torch.from_numpy(img_np).permute(2,0,1).float().div(255).unsqueeze(0).to(DEVICE)
@@ -127,11 +119,3 @@ class SpaceAugTransform:
                 x = _get_stylaug()(x, alpha=self.styleaug_alpha)
             result['image'] = x.squeeze(0).permute(1,2,0).mul(255).clamp(0,255).byte().cpu().numpy()
         return result
-
-    def __call__(self, **kwargs):
-        image = kwargs.get('image')
-        image = self.apply_pre(image)
-        return self.apply_post(image,
-            keypoints=kwargs.get('keypoints'),
-            mask=kwargs.get('mask'),
-            coors=kwargs.get('coors'))
