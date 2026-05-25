@@ -695,15 +695,15 @@ if has_pytorch:
 
             np_image = np.array(pil_image)
             ymax, xmax, _ = np_image.shape
+
+            # Layer 1: mark kp outside original image as invisible
+            for i in range(len(kp)):
+                if not (kp[i][0] > 0 and kp[i][1] > 0 and kp[i][0] < xmax and kp[i][1] < ymax):
+                    kp[i][2] = 0
             target_dict = {}
 
             # --- compute bbox from original keypoints ---
-            kp_orig = []
-            for x, y, view in kp:
-                if x > 0 and y > 0 and x < xmax and y < ymax:
-                    kp_orig.append([x, y, view])
-                else:
-                    kp_orig.append([x, y, 0])
+            kp_orig = [[x, y, v] for x, y, v in kp]
             b, padded_ratio = self.calculate_boxes_and_padded(torch.tensor(kp_orig, dtype=torch.float32), padded=self.padded)
             target_dict["padded_ratio"] = padded_ratio
             x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
@@ -751,6 +751,7 @@ if has_pytorch:
             cx1, cy1 = max(x1, 0), max(y1, 0)
             cx2, cy2 = min(x2, W), min(y2, H)
             cropped_img = np_image[cy1:cy2, cx1:cx2]
+            p_top = p_bottom = p_left = p_right = 0
             if self.padded:
                 p_top, p_bottom = max(0, -y1), max(0, y2 - H)
                 p_left, p_right = max(0, -x1), max(0, x2 - W)
@@ -795,8 +796,8 @@ if has_pytorch:
             # --- keypoints to 256 space (train) or crop space (val) ---
             keypoints = []
             for x, y, v in kp:
-                in_bounds = x > 0 and y > 0 and x < (x2 - x1) and y < (y2 - y1)
-                keypoints.append([x, y, 1 if in_bounds else 0])
+                in_bounds = x > 0 and y > 0 and x < (x2 - x1 - p_right) and y < (y2 - y1 - p_bottom) and x >= p_left and y >= p_top
+                keypoints.append([x, y, 1 if (v > 0 and in_bounds) else 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
             k = torch.reshape(k, (-1, 3))
 
