@@ -334,8 +334,6 @@ def parse_args():
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
-    parser.add_argument('--aug_type', type=str, default='none',
-                        help='Space augmentation: aug1-aug4, aug5, augmix, styleaug, none')
     parser.add_argument('--resume_path', type=str, default='',
                         help='Workingdir UUID path for evaluate mode')
     parser.add_argument('--padded', action='store_true', default=False,
@@ -394,7 +392,7 @@ def main():
         model.load_state_dict(checkpoint, strict=True)
 
     if args.mode == 'train':
-        train_dataset = build_dataset(config, 'train', aug_type=args.aug_type, padded=args.padded)
+        train_dataset = build_dataset(config, 'train', aug_type=config['TRAIN'].get('AUG_TYPE', 'none'), padded=args.padded)
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
                                            shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
