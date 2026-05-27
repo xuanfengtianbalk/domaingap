@@ -143,7 +143,7 @@ def test_coords_gs(loader, aug_type, n_max=200):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--aug', type=str, nargs='+', default=['augbaseline'])#,'augbaseline' none
-    parser.add_argument('--mode', type=str, default='train')
+    parser.add_argument('--mode', type=str, default='validation')
     args = parser.parse_args()
 
 

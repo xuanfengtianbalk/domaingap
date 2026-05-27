@@ -717,95 +717,72 @@ if has_pytorch:
                 coors = self.get_coors(depth_path, pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
                 mask = np.all(np.isfinite(coors), axis=0)
 
-            # --- augment on full image (rotation + pixel augs) ---
-            if is_aug:
-                kp_trans = [[x, y, v] for x, y, v in kp]
-                if self.split == 'train' or self.split == 'validation':
-                    trans_image = self.transform(image=np_image, keypoints=kp_trans,
-                                                  mask=mask.astype(np.uint8),
-                                                  coors=np.transpose(coors, (1, 2, 0)))
-                else:
-                    trans_image = self.transform(image=np_image, keypoints=kp_trans)
-                kp = trans_image['keypoints']
-                np_image = trans_image['image']
-
-                # recompute bbox from augmented kp
-                akp = torch.tensor([[x, y, v] for x, y, v in kp], dtype=torch.float32)
-                box_new, _ = self.calculate_boxes_and_padded(akp, padded=self.padded)
-                x1, y1, x2, y2 = int(box_new[0]), int(box_new[1]), int(box_new[2]), int(box_new[3])
-
-                kp_crop = [[x - x1, y - y1, v] for x, y, v in kp]
-                kp_trans = kp_crop
-            else:
-                kp_trans = [[x - x1, y - y1, v] for x, y, v in kp]
-
-            if is_aug and self.split in ('train', 'validation'):
-                new_mask = trans_image['mask'].T
-                new_coors = np.transpose(trans_image['coors'], (2, 1, 0))
-            elif self.split in ('train', 'validation'):
-                new_mask = mask.T
-                new_coors = np.transpose(coors, (0, 2, 1))
-
             # --- crop + resize image to 256x256 ---
-            H, W = H_o, W_o
             cx1, cy1 = max(x1, 0), max(y1, 0)
-            cx2, cy2 = min(x2, W), min(y2, H)
+            cx2, cy2 = min(x2, W_o), min(y2, H_o)
             cropped_img = np_image[cy1:cy2, cx1:cx2]
             p_top = p_bottom = p_left = p_right = 0
             if self.padded:
-                p_top, p_bottom = max(0, -y1), max(0, y2 - H)
-                p_left, p_right = max(0, -x1), max(0, x2 - W)
+                p_top, p_bottom = max(0, -y1), max(0, y2 - H_o)
+                p_left, p_right = max(0, -x1), max(0, x2 - W_o)
                 if p_top or p_bottom or p_left or p_right:
                     cropped_img = cv2.copyMakeBorder(cropped_img, p_top, p_bottom, p_left, p_right, cv2.BORDER_CONSTANT, value=0)
             resized_img = cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-            # --- crop coors/mask from augmented data ---
+            # --- kp to 256 space for augment, crop space for none ---
+            if is_aug:
+                scale_x = 256.0 / (x2 - x1)
+                scale_y = 256.0 / (y2 - y1)
+                kp_trans = []
+                for x, y, v in kp:
+                    kp_trans.append([(x - x1) * scale_x, (y - y1) * scale_y, v])
+            else:
+                kp_trans = [[x - x1, y - y1, v] for x, y, v in kp]
+
+            # --- crop coors/mask from full resolution, resize to 256 ---
             if self.split == 'train' or self.split == 'validation':
-                cx1, cx2 = max(x1, 0), min(x2, W_o)
-                cy1, cy2 = max(y1, 0), min(y2, H_o)
-                coors_crop = new_coors[:, cx1:cx2, cy1:cy2]
-                mask_crop = new_mask[cx1:cx2, cy1:cy2]
+                cx1_o, cx2_o = max(x1, 0), min(x2, W_o)
+                cy1_o, cy2_o = max(y1, 0), min(y2, H_o)
+                coors_crop = coors[:, cy1_o:cy2_o, cx1_o:cx2_o]
+                mask_crop = mask[cy1_o:cy2_o, cx1_o:cx2_o]
                 if self.padded:
-                    p_top_o, p_bottom_o = max(0, -y1), max(0, y2 - H_o)
-                    p_left_o, p_right_o = max(0, -x1), max(0, x2 - W_o)
-                    if p_top_o or p_bottom_o or p_left_o or p_right_o:
-                        coors_crop = np.pad(coors_crop, ((0,0),(p_left_o,p_right_o),(p_top_o,p_bottom_o)), constant_values=np.nan)
-                        mask_crop = np.pad(mask_crop, ((p_left_o,p_right_o),(p_top_o,p_bottom_o)), constant_values=0)
+                    if p_top or p_bottom or p_left or p_right:
+                        coors_crop = np.pad(coors_crop, ((0,0),(p_top,p_bottom),(p_left,p_right)), constant_values=np.nan)
+                        mask_crop = np.pad(mask_crop, ((p_top,p_bottom),(p_left,p_right)), constant_values=0)
                 coors_resized = np.transpose(cv2.resize(
                     np.transpose(coors_crop, (1, 2, 0)), (256, 256),
                     interpolation=cv2.INTER_NEAREST), (2, 0, 1))
                 mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
                                           interpolation=cv2.INTER_NEAREST)
-                target_dict["coors_gt"] = torch.tensor(coors_resized)
-                target_dict["mask_gt"] = torch.tensor(mask_resized)
 
-            # --- post-transform on 256 crop (norm only for non-aug) ---
-            if not is_aug:
-                if self.split == 'train' or self.split == 'validation':
-                    trans_post = self.transform(image=resized_img, keypoints=kp_trans,
-                                                mask=mask_resized.astype(np.uint8),
-                                                coors=np.transpose(coors_resized, (1, 2, 0)))
-                else:
-                    trans_post = self.transform(image=resized_img, keypoints=kp_trans)
-                kp = trans_post['keypoints']
-                final_image = trans_post['image']
+                trans_image = self.transform(image=resized_img, keypoints=kp_trans,
+                                              mask=mask_resized.astype(np.uint8),
+                                              coors=np.transpose(coors_resized, (1, 2, 0)))
+                new_coors = np.transpose(trans_image['coors'], (2, 1, 0))
+                new_mask = trans_image['mask'].T
+                target_dict["coors_gt"] = torch.tensor(new_coors)
+                target_dict["mask_gt"] = torch.tensor(new_mask)
             else:
-                kp = kp_trans
-                final_image = resized_img
+                trans_image = self.transform(image=resized_img, keypoints=kp_trans)
+            kp = trans_image['keypoints']
+            final_image = self.transform.apply_norm(trans_image['image'])
 
             # --- keypoints to 256 space (train) or crop space (val) ---
             keypoints = []
             for x, y, v in kp:
-                in_bounds = x > 0 and y > 0 and x < (x2 - x1 - p_right) and y < (y2 - y1 - p_bottom) and x >= p_left and y >= p_top
-                keypoints.append([x, y, 1 if (v > 0 and in_bounds) else 0])
+                # in_bounds = x > 0 and y > 0 and x < (x2 - x1 - p_right) and y < (y2 - y1 - p_bottom) and x >= p_left and y >= p_top
+                # keypoints.append([x, y, 1 if (v > 0 and in_bounds) else 0])
+                keypoints.append([x, y, 0])
             k = torch.tensor(keypoints, dtype=torch.float32)
             k = torch.reshape(k, (-1, 3))
 
             b = torch.tensor([x1, y1, x2, y2], dtype=torch.float32).reshape(1, 4)
-            target_dict["imageshape"] = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
+            if self.split == 'train':
+                target_dict["imageshape"] = torch.tensor([256, 256])
+            else:
+                target_dict["imageshape"] = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
 
             trans = self.to_tensor
-            final_image = self.transform.apply_norm(final_image)
             tt = trans(image=final_image)
             torch_image = tt['image']
 

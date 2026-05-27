@@ -49,7 +49,7 @@ class SpaceAugTransform:
                                    border_mode=cv2.BORDER_CONSTANT, fill=0),
                 A.RandomBrightnessContrast(p=1),
                 A.OneOf([A.GaussNoise()], p=0.5),
-                A.RandomSunFlare(flare_roi=(0,0,1,1), src_radius=400, num_flare_circles_range=(1,2), p=0.5),
+                # A.RandomSunFlare(flare_roi=(0,0,1,1), src_radius=400, num_flare_circles_range=(1,2), p=0.5),
                 A.OneOf([A.MotionBlur(p=0.5), A.MedianBlur(blur_limit=3, p=0.5),
                          A.Blur(blur_limit=3, p=0.5)], p=1),
             ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
