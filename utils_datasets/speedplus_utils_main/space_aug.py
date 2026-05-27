@@ -27,7 +27,7 @@ class SpaceAugTransform:
         self.IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
         self.IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
         self.norm = A.Normalize(mean=self.IMAGENET_DEFAULT_MEAN, std=self.IMAGENET_DEFAULT_STD)
-        self._use_styleaug = aug_type in ('styleaug', 'augmix', 'aug4s')
+        self._use_styleaug = (styleaug_p > 0)
         self.is_augmented = aug_type.lower() not in ('none', 'styleaug')
         self._pipeline = self._build()
 
