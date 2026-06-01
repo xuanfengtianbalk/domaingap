@@ -1,6 +1,10 @@
 import argparse
 import yaml
 import os
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+import warnings
+warnings.filterwarnings('ignore', message='Error fetching version info')
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -332,6 +336,8 @@ def parse_args():
                     help='GPU device IDs to use (e.g., --gpu 0 1 2)')
     parser.add_argument('--model_type', nargs='+',
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
+    parser.add_argument('--train_script', type=str, default='train', choices=['train', 'train_randconv'],
+                        help='Which training script to use')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
     parser.add_argument('--resume_path', type=str, default='',
@@ -398,7 +404,7 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
                                   shuffle=(train_sampler is None), num_workers=8,
                                   pin_memory=True, persistent_workers=True,
-                                  sampler=train_sampler)
+                                  sampler=train_sampler, multiprocessing_context='spawn')
         val_dataset = build_dataset(config, 'validation')
         val_loader = DataLoader(val_dataset, batch_size=config['TRAIN']['BATCH_SIZE'], shuffle=False, num_workers=8)
         val_loader_eval = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
@@ -442,11 +448,24 @@ def main():
         criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc)
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
+
+        rand_conv = None
+        if args.train_script == 'train_randconv':
+            from Hyperpose_net.losses.rand_conv import RandConvLayer
+            rand_conv = RandConvLayer(
+                p=config['TRAIN'].get('RAND_CONV_P', 0.5),
+                mix=config['TRAIN'].get('RAND_CONV_MIX', False),
+            ).to(device)
+
         epochs = config['TRAIN']['MAX_EPOCH']
         for epoch in range(epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
-            train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
+            if args.train_script == 'train_randconv':
+                from train_randconv import train_one_epoch_randconv
+                train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, rand_conv=rand_conv, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=config['TRAIN'].get('RAND_CONV_N_BRANCHES', 3))
+            else:
+                train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
             if is_master:
                 print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
 

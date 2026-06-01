@@ -4,6 +4,7 @@ Drop-in replacement for albumentations transform.
 """
 import warnings
 warnings.filterwarnings('ignore', message='Got processor for keypoints, but no transform to process it.')
+warnings.filterwarnings('ignore', message='Error fetching version info')
 import torch
 import numpy as np
 import albumentations as A
