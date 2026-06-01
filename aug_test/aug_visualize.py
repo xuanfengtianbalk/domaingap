@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
 from utils_datasets.speedplus_utils_main.utils import (
     PyTorchSatellitePoseEstimationDataset, points as body_points)
-from Hyperpose_net.losses.rand_conv import RandConvLayer
+from Hyperpose_net.losses.consistency import ConsistencyAugmentor
 
 DATASET_DIR = '/opt/dl_workspace/algorithm/04-myself/domaingap/datasets/speedplus/speedplus'
 OUT_DIR = '/opt/dl_workspace/algorithm/04-myself/domaingap/aug_test'
@@ -40,8 +40,11 @@ if __name__ == '__main__':
             split='train', speed_root=DATASET_DIR, points=body_points,
             transform=SpaceAugTransform(at, styleaug_p=sp))
 
-    rand_conv = RandConvLayer(p=0.0, mix=True)
-    rand_conv.train()  # p=0 → always apply RandConv
+    augmentor = ConsistencyAugmentor([
+        # {'type': 'randconv', 'mix': False, 'p': 0.0},
+        {'type': 'aug', 'aug_type': 'augmix'}
+    ])
+    augmentor.train()  # p=0 → always apply RandConv
 
     n_cols = 8  # crop + 7 augs + randconv + sunlamp
     n_total = len(ds_none)
@@ -62,21 +65,9 @@ if __name__ == '__main__':
             axes[j + 1].imshow(denorm(sample_aug))
             axes[j + 1].set_title(at, fontsize=6); axes[j + 1].axis('off')
 
-        # 3) RandConv: apply on raw [0,1] image (before norm, matching training pipe)
-
-        sample_none, _ = aug_datasets['augmix'][idx]
-
-        # img_tensor = torch.from_numpy(resized).float().permute(2, 0, 1).unsqueeze(0)/255
-        # rc_raw = rand_conv(img_tensor).squeeze(0)
-        rc_raw = rand_conv(sample_none.unsqueeze(0)).squeeze(0)
-        rc_min, rc_max = rc_raw.min(), rc_raw.max()
-        if 1:
-            rc_out = ((rc_raw - rc_min) / (rc_max - rc_min)).permute(1, 2, 0).numpy()
-        else:
-            rc_out=rc_raw.permute(1, 2, 0).numpy()
-            # rc_out=denorm(rc_raw)
-            # rc_out = ((rc_raw*std_t)/STD).clamp(0, 1).permute(1, 2, 0).numpy()*255
-        axes[-2].imshow(rc_out)
+        # 3) RandConv: full pipeline (pre→trans→post) matching training, denorm for display
+        rc_out = augmentor(sample_none.unsqueeze(0))[0].squeeze(0)
+        axes[-2].imshow(denorm(rc_out))
         axes[-2].set_title('RandConv', fontsize=6); axes[-2].axis('off')
 
         # 4) Sunlamp reference

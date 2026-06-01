@@ -336,7 +336,7 @@ def parse_args():
                     help='GPU device IDs to use (e.g., --gpu 0 1 2)')
     parser.add_argument('--model_type', nargs='+',
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
-    parser.add_argument('--train_script', type=str, default='train', choices=['train', 'train_randconv'],
+    parser.add_argument('--train_script', type=str, default='train', choices=['train', 'train_consistency'],
                         help='Which training script to use')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
@@ -449,21 +449,30 @@ def main():
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
 
-        rand_conv = None
-        if args.train_script == 'train_randconv':
-            from Hyperpose_net.losses.rand_conv import RandConvLayer
-            rand_conv = RandConvLayer(
-                p=config['TRAIN'].get('RAND_CONV_P', 0.5),
-                mix=config['TRAIN'].get('RAND_CONV_MIX', False),
-            ).to(device)
+        consistency_layers = None
+        if args.train_script == 'train_consistency':
+            from Hyperpose_net.losses.consistency import ConsistencyAugmentor
+            n_branches = config['TRAIN'].get('RAND_CONV_N_BRANCHES', 3)
+            ctype = config['TRAIN'].get('CONSISTENCY_TYPE', 'randconv')
+            if ctype == 'randconv':
+                branch_specs = [{'type': 'randconv',
+                                 'mix': config['TRAIN'].get('RAND_CONV_MIX', False),
+                                 'p': config['TRAIN'].get('RAND_CONV_P', 0.5)}
+                                for _ in range(n_branches)]
+            elif ctype == 'aug':
+                branch_specs = [{'type': 'aug', 'aug_type': 'augmix'}
+                                for _ in range(n_branches)]
+            else:
+                raise ValueError(f"Unknown CONSISTENCY_TYPE: {ctype}")
+            consistency_layers = ConsistencyAugmentor(branch_specs).to(device)
 
         epochs = config['TRAIN']['MAX_EPOCH']
         for epoch in range(epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
-            if args.train_script == 'train_randconv':
-                from train_randconv import train_one_epoch_randconv
-                train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, rand_conv=rand_conv, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=config['TRAIN'].get('RAND_CONV_N_BRANCHES', 3))
+            if args.train_script == 'train_consistency':
+                from train_consistency import train_one_epoch_randconv
+                train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, layers=consistency_layers, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=n_branches)
             else:
                 train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
             if is_master:

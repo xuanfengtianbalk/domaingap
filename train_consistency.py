@@ -2,9 +2,6 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
 
 def _heatmap_kl(branch, mean):
     """KL over spatial dims for keypoints heatmaps [B, K, H, W]."""
@@ -30,7 +27,7 @@ def _bin_kl(branch, mean, mask, total_bins):
 
 
 def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer,
-                              scheduler, device, rand_conv=None, bc=None,
+                              scheduler, device, layers=None, bc=None,
                               consistency_weight=0.1, n_branches=3):
     """Algorithm 1 lines 15-22: RandConv training with 3-branch consistency."""
     model.train()
@@ -67,29 +64,22 @@ def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer
         if 'keypoints_gs' in model_type:
             target_dict['keypoints_gs'] = torch.stack(gt_target_keypts)
 
-        # ---- 3 independent RandConv forward passes (lines 16-18) ----
-        mean_t = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
-        std_t = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
+        # ---- N independent consistency-aug forward passes (lines 16-18) ----
         branches = []
         for j in range(n_branches):
-            if rand_conv is not None:
-                # x_raw = (inputs * std_t + mean_t).clamp(0, 1)
-                x_rc = rand_conv(inputs)
-                rc_min, rc_max = x_rc.min(), x_rc.max()
-                x_rc = ((x_rc - rc_min) / (x_rc - rc_min))
-                x_rc = (x_rc - mean_t) / std_t
-            else:
-                x_rc = inputs
+            x_aug = layers[j](inputs) if layers is not None else inputs
             with torch.amp.autocast('cuda'):
-                outputs_j = model(x_rc)
+                outputs_j = model(x_aug)
             branches.append(outputs_j)
 
         # convert autocast float16 → float32 for stable consistency loss
         branches = [{k: v.float() for k, v in b.items()} for b in branches]
 
-        # ---- task loss on first branch only (line 21, left term) ----
+        # ---- task loss on all branches ----
+        L_task = torch.tensor(0.0, device=device)
         with torch.amp.autocast('cuda'):
-            L_task = criterion(branches[0], imageshapes, target_dict)
+            for j in range(n_branches):
+                L_task += criterion(branches[j], imageshapes, target_dict)
 
         # ---- consistency loss: KL(ŷⱼ ‖ ȳ) (lines 19-20) ----
         L_cons = torch.tensor(0.0, device=device)
