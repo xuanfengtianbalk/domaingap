@@ -16,8 +16,7 @@ from .base import BaseConsistencyLayer
 # ---------------------------------------------------------------------------
 
 _BRIGHTNESS = [
-    A.RandomBrightnessContrast(contrast_limit=0.3, brightness_limit=0, p=1),
-    A.RandomBrightnessContrast(contrast_limit=0, brightness_limit=0.3, p=1),
+    A.RandomBrightnessContrast(contrast_limit=0.3, brightness_limit=0.3, p=1),
     A.InvertImg(p=1),
     A.MultiplicativeNoise((0.9, 1.1), p=1),
     A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, p=1),
@@ -63,12 +62,11 @@ def _make_mix_pipeline(brightness, blur, corrupt, general,
     n_sample : int
         Number of transforms to sample from each pool (default 2).
     """
-    return A.Compose([
-        A.Compose([A.SomeOf(brightness, n=n_sample, p=1)], p=1),
-        A.Compose([A.SomeOf(blur,       n=n_sample, p=1)], p=1),
-        A.Compose([A.SomeOf(corrupt,    n=n_sample, p=1)], p=1),
-        A.Compose([A.SomeOf(general,    n=n_sample, p=1)], p=1),
-    ])
+    stages = []
+    for pool in [brightness, blur, corrupt, general]:
+        if pool:
+            stages.append(A.Compose([A.SomeOf(pool, n=n_sample, p=1)], p=1))
+    return A.Compose(stages)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +90,7 @@ class AugConsistencyLayer(BaseConsistencyLayer):
     """
 
     _PIPELINES = {
-        'augmix':      _make_mix_pipeline(_BRIGHTNESS, _BLUR, _CORRUPT, _GENERAL),
-        'augmix_light': _make_mix_pipeline(_BRIGHTNESS, _BLUR, [], []),
-        'none':        A.Compose([]),
+        'augmix': _make_mix_pipeline(_BRIGHTNESS, _BLUR, _CORRUPT, _GENERAL, n_sample=2),
     }
 
     def __init__(self, aug_type: str = 'augmix'):

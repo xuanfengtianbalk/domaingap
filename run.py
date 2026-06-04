@@ -398,7 +398,28 @@ def main():
         model.load_state_dict(checkpoint, strict=True)
 
     if args.mode == 'train':
+        # build consistency layers before dataset (aug layers go into DataLoader workers)
+        consistency_layers = None
+        randconv_layers = None
+        n_aug_branches = 0
+        if args.train_script == 'train_consistency':
+            from Hyperpose_net.losses.consistency import (RandConvLayer,
+                   AugConsistencyLayer, ConsistencyAugmentor)
+            n_branches = config['TRAIN'].get('RAND_CONV_N_BRANCHES', 3)
+            ctype = config['TRAIN'].get('CONSISTENCY_TYPE', 'randconv')
+            if ctype == 'randconv':
+                randconv_layers = nn.ModuleList([RandConvLayer(
+                    mix=config['TRAIN'].get('RAND_CONV_MIX', False),
+                    p=config['TRAIN'].get('RAND_CONV_P', 0.5)).to(device)
+                    for _ in range(n_branches)])
+            elif ctype == 'aug':
+                augs = nn.ModuleList([AugConsistencyLayer(
+                    aug_type='augmix').train() for _ in range(n_branches)])
+                n_aug_branches = n_branches
+
         train_dataset = build_dataset(config, 'train', aug_type=config['TRAIN'].get('AUG_TYPE', 'none'), padded=args.padded)
+        if n_aug_branches > 0:
+            train_dataset.consistency_layers = augs
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
                                            shuffle=True) if world_size > 1 else None
         train_loader = DataLoader(train_dataset, batch_size=config['TRAIN']['BATCH_SIZE'],
@@ -449,30 +470,13 @@ def main():
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
 
-        consistency_layers = None
-        if args.train_script == 'train_consistency':
-            from Hyperpose_net.losses.consistency import ConsistencyAugmentor
-            n_branches = config['TRAIN'].get('RAND_CONV_N_BRANCHES', 3)
-            ctype = config['TRAIN'].get('CONSISTENCY_TYPE', 'randconv')
-            if ctype == 'randconv':
-                branch_specs = [{'type': 'randconv',
-                                 'mix': config['TRAIN'].get('RAND_CONV_MIX', False),
-                                 'p': config['TRAIN'].get('RAND_CONV_P', 0.5)}
-                                for _ in range(n_branches)]
-            elif ctype == 'aug':
-                branch_specs = [{'type': 'aug', 'aug_type': 'augmix'}
-                                for _ in range(n_branches)]
-            else:
-                raise ValueError(f"Unknown CONSISTENCY_TYPE: {ctype}")
-            consistency_layers = ConsistencyAugmentor(branch_specs).to(device)
-
         epochs = config['TRAIN']['MAX_EPOCH']
         for epoch in range(epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
             if args.train_script == 'train_consistency':
                 from train_consistency import train_one_epoch_randconv
-                train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, layers=consistency_layers, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=n_branches)
+                train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, randconv_layers=randconv_layers, n_aug_branches=n_aug_branches, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=n_branches)
             else:
                 train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
             if is_master:

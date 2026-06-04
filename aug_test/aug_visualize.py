@@ -65,10 +65,10 @@ if __name__ == '__main__':
             axes[j + 1].imshow(denorm(sample_aug))
             axes[j + 1].set_title(at, fontsize=6); axes[j + 1].axis('off')
 
-        # 3) RandConv: full pipeline (pre→trans→post) matching training, denorm for display
+        # 3) AugConsistencyLayer: full pipeline matching experiment A, denorm for display
         rc_out = augmentor(sample_none.unsqueeze(0))[0].squeeze(0)
         axes[-2].imshow(denorm(rc_out))
-        axes[-2].set_title('RandConv', fontsize=6); axes[-2].axis('off')
+        axes[-2].set_title('AugConsistency', fontsize=6); axes[-2].axis('off')
 
         # 4) Sunlamp reference
         sun_dir = os.path.join(DATASET_DIR, 'sunlamp', 'images')

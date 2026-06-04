@@ -27,36 +27,45 @@ def _bin_kl(branch, mean, mask, total_bins):
 
 
 def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer,
-                              scheduler, device, layers=None, bc=None,
-                              consistency_weight=0.1, n_branches=3):
-    """Algorithm 1 lines 15-22: RandConv training with 3-branch consistency."""
+                              scheduler, device, randconv_layers=None, n_aug_branches=0,
+                              bc=None, consistency_weight=0.1, n_branches=3):
+    """Consistency training: aug branches pre-computed in dataset workers,
+    randconv branches applied on-the-fly on GPU."""
     model.train()
     losses_epoch = []
     pbar = tqdm(dataloader, desc="Train", ncols=100)
     for (samples, targets) in pbar:
 
+        # samples shape: [B, N, C, H, W] with aug, or [B, C, H, W] without
+        has_variants = (samples.dim() == 5)
+        if has_variants:
+            B, N_img, C, H, W = samples.shape
+            # original at index 0, aug variants at indices 1..n_aug_branches
+            img_original = samples[:, 0].to(device)
+            aug_variants = samples[:, 1:].to(device)  # [B, n_aug, C, H, W]
+        else:
+            img_original = samples.to(device)
+            aug_variants = None
+
+        # prepare targets once (shared across branches)
         target_list = [{} for _ in range(samples.shape[0])]
         for k in targets.keys():
             for i in range(samples.shape[0]):
                 target_list[i][k] = targets[k][i].to(device)
 
-        org_imgs_list = []
+        imageshapes_list = []
         coors_gt_list = []
         mask_gt_list = []
         gt_target_keypts = []
-        imageshapes_list = []
-        for img, target in zip(samples, target_list):
-            org_imgs_list.append(img.to(device))
+        for target in target_list:
+            imageshapes_list.append(target["imageshape"])
             if 'coordinates' in model_type or 'coordinates_gs' in model_type:
                 coors_gt_list.append(target["coors_gt"].float().to(device))
                 mask_gt_list.append(target["mask_gt"].float().to(device))
             if 'keypoints_gs' in model_type:
                 gt_target_keypts.append(target['keypoints'])
-            imageshapes_list.append(target["imageshape"])
 
-        inputs = torch.stack(org_imgs_list)                        # [B, 3, H, W]
         imageshapes = torch.stack(imageshapes_list)
-
         target_dict = {}
         if 'coordinates' in model_type or 'coordinates_gs' in model_type:
             target_dict['coordinates'] = torch.stack(coors_gt_list)
@@ -64,22 +73,28 @@ def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer
         if 'keypoints_gs' in model_type:
             target_dict['keypoints_gs'] = torch.stack(gt_target_keypts)
 
-        # ---- N independent consistency-aug forward passes (lines 16-18) ----
+        # ---- build all branches ----
         branches = []
+        aug_idx = 0
         for j in range(n_branches):
-            x_aug = layers[j](inputs) if layers is not None else inputs
+            if randconv_layers is not None and j < len(randconv_layers):
+                x = randconv_layers[j](img_original)
+            elif aug_variants is not None and aug_idx < n_aug_branches:
+                x = aug_variants[:, aug_idx]
+                aug_idx += 1
+            else:
+                x = img_original
             with torch.amp.autocast('cuda'):
-                outputs_j = model(x_aug)
+                outputs_j = model(x)
             branches.append(outputs_j)
 
         # convert autocast float16 → float32 for stable consistency loss
         branches = [{k: v.float() for k, v in b.items()} for b in branches]
 
         # ---- task loss on all branches ----
-        L_task = torch.tensor(0.0, device=device)
+        # ---- task loss on first branch only (line 20) ----
         with torch.amp.autocast('cuda'):
-            for j in range(n_branches):
-                L_task += criterion(branches[j], imageshapes, target_dict)
+            L_task = criterion(branches[0], imageshapes, target_dict)
 
         # ---- consistency loss: KL(ŷⱼ ‖ ȳ) (lines 19-20) ----
         L_cons = torch.tensor(0.0, device=device)
@@ -111,9 +126,9 @@ def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer
 
         total_loss = L_task + consistency_weight * L_cons
 
-        pbar.set_postfix(L=f"{total_loss.item():.3f}",
-                         T=f"{L_task.item():.3f}",
-                         C=f"{L_cons.item():.3f}",
+        pbar.set_postfix(L=f"{total_loss.item():.4f}",
+                         T=f"{L_task.item():.4f}",
+                         C=f"{L_cons.item():.2e}",
                          lr=f"{optimizer.param_groups[0]['lr']:.1e}")
         optimizer.zero_grad()
         total_loss.backward()

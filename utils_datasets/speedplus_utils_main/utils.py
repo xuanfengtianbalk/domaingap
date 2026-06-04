@@ -500,7 +500,8 @@ if has_pytorch:
         """ SPEED dataset that can be used with DataLoader for PyTorch training. """
 
         def __init__(self, split='train', speed_root='datasets/', points=None, transform=None,
-                     IS_VALID=False, padded=False, use_convex_hull=True):
+                     IS_VALID=False, padded=False, use_convex_hull=True,
+                     consistency_layers=None):
             import albumentations as A
             # self.mask = A.Compose([A.CoarseDropout(max_holes=3, max_height=150, max_width=150, min_holes=2, min_height=50, min_width=50
             #              , fill_value=255, mask_fill_value=100,p=0.5)])
@@ -548,6 +549,7 @@ if has_pytorch:
             self.use_convex_hull = use_convex_hull
             self.points = points
             self.to_tensor = A.Compose([ToTensorV2(p=1.0)])
+            self.consistency_layers = consistency_layers
 
 
         def get_labels(self):
@@ -792,6 +794,13 @@ if has_pytorch:
             torch_image = torch.transpose(torch_image, dim0=-2, dim1=-1)
             target_dict["q_gt"] = torch.tensor(q)
             target_dict["r_gt"] = torch.tensor(r)
+
+            if self.consistency_layers is not None:
+                variants = [torch_image]
+                for layer in self.consistency_layers:
+                    var = layer(torch_image.unsqueeze(0)).squeeze(0)
+                    variants.append(var)
+                return torch.stack(variants, dim=0), target_dict
 
             return torch_image, target_dict
 
