@@ -212,7 +212,7 @@ class Depther(torch.nn.Module):
         for key in self.decoder.keys():
             if key == "keypoints_gs":
                 # 使用 FeaturesToMaps 作为输出头（后续可替换为专用头）
-                self.heads[key] = FeaturesToMaps(num_maps=output_channel, activate=activate)
+                self.heads[key] = FeaturesToMaps(num_maps=11, activate=activate)
             elif key == "coordinates":
                 self.heads[key] = FeaturesToMaps(num_maps=3, activate=activate)
                 self.heads['mask'] = FeaturesToMaps(num_maps=1, activate='sigmoid')

@@ -416,6 +416,12 @@ def main():
                 augs = nn.ModuleList([AugConsistencyLayer(
                     aug_type='augmix').train() for _ in range(n_branches)])
                 n_aug_branches = n_branches
+            elif ctype == 'patch_mask':
+                from Hyperpose_net.losses.consistency import PatchMaskLayer
+                augs = nn.ModuleList([PatchMaskLayer(
+                    mask_ratio=config['TRAIN'].get('RAND_CONV_MASK_RATIO', 0.5)).train()
+                    for _ in range(n_branches)])
+                n_aug_branches = n_branches
 
         train_dataset = build_dataset(config, 'train', aug_type=config['TRAIN'].get('AUG_TYPE', 'none'), padded=args.padded)
         if n_aug_branches > 0:

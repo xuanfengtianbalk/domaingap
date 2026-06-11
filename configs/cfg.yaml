@@ -11,7 +11,6 @@ MODEL:
     SAMPLE_RANGE: [-0.7, 0.7]
     N_PER_UNIT: 30
     SIGMA_FACTOR: 1.5
-    LOSS_TYPE: 'js'  # js, ce
     LOSS_REDUCTION: 'mean'  # mean (per-pixel avg) or sum (per-pixel sum then avg)
     USE_MASK: False   # use mask head for coordinates_gs
 
@@ -31,9 +30,9 @@ TRAIN:
   USE_CONVEX_HULL: true  # use convex hull for keypoint visibility (default on)
   RAND_CONV_P: 0.5       # prob of keeping original image (only when RAND_CONV_MIX=false)
   RAND_CONV_MIX: true    # if true, always RandConv then α-blend with original
-  RAND_CONV_CONSISTENCY: 0.1  # weight for consistency loss (KL between 3 RandConv branches)
+  RAND_CONV_CONSISTENCY: 10  # weight for consistency loss (KL between 3 RandConv branches)
   RAND_CONV_N_BRANCHES: 3  # number of independent RandConv forward passes per image
-  CONSISTENCY_TYPE: randconv  # 'randconv' or 'aug' — branch type for consistency training
+  CONSISTENCY_TYPE: randconv  # 'randconv', 'aug', or 'patch_mask'
 
 TEST:
   SAVE_DIR: 'test'

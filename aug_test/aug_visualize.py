@@ -41,8 +41,8 @@ if __name__ == '__main__':
             transform=SpaceAugTransform(at, styleaug_p=sp))
 
     augmentor = ConsistencyAugmentor([
-        # {'type': 'randconv', 'mix': False, 'p': 0.0},
-        {'type': 'aug', 'aug_type': 'augmix'}
+        {'type': 'randconv', 'mix': True, 'p': 0.0},
+        # {'type': 'aug', 'aug_type': 'augmix'}
     ])
     augmentor.train()  # p=0 → always apply RandConv
 

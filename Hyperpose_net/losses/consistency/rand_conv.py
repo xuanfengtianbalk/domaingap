@@ -17,7 +17,7 @@ class RandConvLayer(BaseConsistencyLayer):
         postprocess → min-max rescale → ImageNet norm
     """
 
-    def __init__(self, kernel_sizes=(1*5, 3*5, 5*5, 7), p=0.5, mix=False):
+    def __init__(self, kernel_sizes=(1, 3, 5, 7), p=0.5, mix=False):
         super().__init__()
         self.kernel_sizes = list(kernel_sizes)
         self.p = p

@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from .rand_conv import RandConvLayer
 from .aug import AugConsistencyLayer
+from .patch_mask import PatchMaskLayer
 
 
 class ConsistencyAugmentor(nn.Module):
@@ -14,17 +15,18 @@ class ConsistencyAugmentor(nn.Module):
     branch_specs : list of dict
         Each dict specifies one branch.  Supported keys:
 
-        - ``type`` (str) – ``'randconv'`` or ``'aug'``
+        - ``type`` (str) – ``'randconv'``, ``'aug'``, or ``'patch_mask'``
         - ``p`` (float, default 0.5) – RandConv keep-original probability
         - ``mix`` (bool, default False) – RandConv α-blend mode
         - ``aug_type`` (str, default ``'augmix'``) – AugConsistencyLayer pipeline
+        - ``mask_ratio`` (float, default 0.5) – patch mask ratio
 
     Examples
     --------
     >>> augmentor = ConsistencyAugmentor([
     ...     {'type': 'randconv', 'mix': True, 'p': 0.5},
-    ...     {'type': 'randconv', 'mix': True, 'p': 0.5},
     ...     {'type': 'aug', 'aug_type': 'augmix'},
+    ...     {'type': 'patch_mask', 'mask_ratio': 0.5},
     ... ]).to(device)
     >>> branches = augmentor(inputs)  # list of 3 tensors
     """
@@ -42,6 +44,11 @@ class ConsistencyAugmentor(nn.Module):
             elif t == 'aug':
                 self.layers.append(AugConsistencyLayer(
                     aug_type=spec.get('aug_type', 'augmix'),
+                ))
+            elif t == 'patch_mask':
+                self.layers.append(PatchMaskLayer(
+                    mask_ratio=spec.get('mask_ratio', 0.5),
+                    p=spec.get('p', 1.0),
                 ))
             else:
                 raise ValueError(f"Branch {i}: unknown type '{t}'")

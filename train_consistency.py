@@ -13,17 +13,23 @@ def _heatmap_kl(branch, mean):
 
 def _bin_kl(branch, mean, mask, total_bins):
     """KL over bin dim for coordinates_gs, masked by valid pixels."""
-    B, _, H, W = branch.shape
-    b = branch.reshape(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # [B,H,W,3,tb]
-    m = mean.reshape(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)
-    mask_bool = mask.squeeze(1) > 0.5  # [B, H, W]
-    b = b[mask_bool]  # [N, 3, tb]
-    m = m[mask_bool]
-    if b.shape[0] == 0:
-        return torch.tensor(0.0, device=branch.device)
-    b = b.reshape(-1, total_bins)  # [N*3, tb]
-    m = m.reshape(-1, total_bins)
-    return F.kl_div(F.log_softmax(b, dim=1), F.softmax(m, dim=1), reduction='batchmean')
+    # B, _, H, W = branch.shape
+    # b = branch.reshape(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # [B,H,W,3,tb]
+    # m = mean.reshape(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)
+    # # mask_bool = mask.squeeze(1) > 0.5  # [B, H, W]
+
+    b = torch.clamp(F.softmax(branch.reshape(-1, total_bins), dim=-1), 1e-12, 1.0)
+    m = torch.clamp(F.softmax(mean.reshape(-1, total_bins), dim=-1), 1e-12, 1.0)
+
+    t = 0.5 * (b + m)
+
+    kl1 = F.kl_div(torch.log(t), b, reduction='none').sum(dim=-1)  # per-pixel sum
+    kl2 = F.kl_div(torch.log(t), m, reduction='none').sum(dim=-1)
+
+    js_per_pixel = 0.5 * (kl1 + kl2)
+
+
+    return js_per_pixel.mean()
 
 
 def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer,
