@@ -274,6 +274,7 @@ def build_depther(
     mixstyle: bool = False,
     mixstyle_p: float = 0.5,
     mixstyle_alpha: float = 0.1,
+    peft_config: dict | None = None,
     **kwargs,
 ):
     # 处理 Decode_Type：统一转换为列表，便于统一处理
@@ -291,6 +292,7 @@ def build_depther(
         mixstyle=mixstyle,
         mixstyle_p=mixstyle_p,
         mixstyle_alpha=mixstyle_alpha,
+        peft_config=peft_config,
     )
 
     # decoder = make_head(

@@ -71,6 +71,7 @@ class DinoVisionTransformerWrapper(nn.Module):
         mixstyle: bool = False,
         mixstyle_p: float = 0.5,
         mixstyle_alpha: float = 0.1,
+        peft_config: dict | None = None,
     ):
         super().__init__()
 
@@ -103,9 +104,13 @@ class DinoVisionTransformerWrapper(nn.Module):
         elif adapt_to_patch_size is PatchSizeAdaptationStrategy.STRETCH:
             self.patch_size_adapter = StretchToMultiple(input_pad_size)
 
-        # Freeze backbone
-        # print(freeze_backbone)
-        self.backbone.requires_grad_(train_backbone)
+        # PEFT — inject trainable adapters, manages its own requires_grad_
+        peft_config = peft_config or {}
+        if peft_config.get('method', 'none') != 'none':
+            from .peft import apply_peft
+            apply_peft(self.backbone, peft_config)
+        else:
+            self.backbone.requires_grad_(train_backbone)
 
         # MixStyle
         self.mixstyle = mixstyle

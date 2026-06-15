@@ -97,8 +97,6 @@ def build_optimizer(config, model):
     optimizer_name = train_config.get('OPTIM', 'SGD')
     print('OPTIM: ',optimizer_name)
     param_groups = [p for p in model.parameters() if p.requires_grad]
-    for name, param in model.named_parameters():
-        print(f"{name}: requires_grad={param.requires_grad}")
     if optimizer_name == 'SGD':
         optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9, weight_decay=1e-4)
     elif optimizer_name == 'AdamW':
