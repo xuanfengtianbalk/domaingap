@@ -28,7 +28,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
             for img, target in zip(samples, target_list):
                 gtbbox = torch.round(target["boxes"].squeeze(0))
                 org_imgs_list.append(img.to(device))
-                if 'coordinates' in model_type or 'coordinates_gs' in model_type:
+                if 'coordinates' in model_type or 'coordinates_gs' in model_type or 'coordinates_DER' in model_type or 'coordinates_gs_EDL' in model_type:
                     coors_gt_list.append(target["coors_gt"].float().to(device))
                     mask_gt_list.append(target["mask_gt"].float().to(device))
                 if 'keypoints_gs' in model_type:
@@ -36,7 +36,7 @@ def valid_one_epoch(model, dataloader, model_type, criterion, device):
                 imageshapes.append(target["imageshape"])
             with torch.amp.autocast('cuda'):
                 inputs = torch.stack(org_imgs_list)
-                if 'coordinates' in model_type or 'coordinates_gs' in model_type:
+                if 'coordinates' in model_type or 'coordinates_gs' in model_type or 'coordinates_DER' in model_type or 'coordinates_gs_EDL' in model_type:
                     coors_gt = torch.stack(coors_gt_list)
                     mask_gt = torch.stack(mask_gt_list)
                     target_dict['coordinates'] = coors_gt
