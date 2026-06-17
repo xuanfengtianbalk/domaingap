@@ -59,7 +59,7 @@ def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer
         gt_target_keypts = []
         for target in target_list:
             imageshapes_list.append(target["imageshape"])
-            if 'coordinates' in model_type or 'coordinates_gs' in model_type:
+            if 'coordinates' in model_type or 'coordinates_gs' in model_type or 'coordinates_DER' in model_type or 'coordinates_gs_EDL' in model_type:
                 coors_gt_list.append(target["coors_gt"].float().to(device))
                 mask_gt_list.append(target["mask_gt"].float().to(device))
             if 'keypoints_gs' in model_type:
@@ -67,7 +67,7 @@ def train_one_epoch_randconv(model, dataloader, model_type, criterion, optimizer
 
         imageshapes = torch.stack(imageshapes_list)
         target_dict = {}
-        if 'coordinates' in model_type or 'coordinates_gs' in model_type:
+        if 'coordinates' in model_type or 'coordinates_gs' in model_type or 'coordinates_DER' in model_type or 'coordinates_gs_EDL' in model_type:
             target_dict['coordinates'] = torch.stack(coors_gt_list)
             target_dict['mask'] = torch.stack(mask_gt_list)
         if 'keypoints_gs' in model_type:

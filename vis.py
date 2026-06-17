@@ -193,7 +193,7 @@ def eval_one_epoch_visualization(
                     collected_images.append(img_arr)
                     plt.close(fig)
 
-                if 'coordinates' in model_type:
+                if 'coordinates' in model_type or 'coordinates_DER' in model_type:
                     # 坐标回归分支：预测的坐标图
                     coord_map = outputs['coordinates'][b]  # 假设形状 (C, H, W) 或 (H, W, C)
                     print(coord_map.shape)
@@ -232,7 +232,7 @@ def eval_one_epoch_visualization(
                     collected_images.append(img_arr)
                     plt.close(fig)
 
-                if 'coordinates_gs' in model_type and bc is not None:
+                if 'coordinates_gs' in model_type or 'coordinates_gs_EDL' in model_type and bc is not None:
                     import torch.nn.functional as F
                     out = outputs['coordinates_gs'][b]  # (3*total_bins, H, W)
                     total_bins = bc.total_bins
