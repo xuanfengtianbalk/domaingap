@@ -216,8 +216,8 @@ class Depther(torch.nn.Module):
             elif key == "coordinates":
                 self.heads[key] = FeaturesToMaps(num_maps=3, activate=activate)
                 self.heads['mask'] = FeaturesToMaps(num_maps=1, activate='sigmoid')
-            elif key == "coordinates_gs":
-                self.heads[key] = FeaturesToMaps(num_maps=output_channel, activate=activate)
+            elif key == "coordinates_gs" or key == "coordinates_gs_EDL":
+                self.heads['coordinates_gs'] = FeaturesToMaps(num_maps=output_channel, activate=activate)
                 self.heads['mask'] = FeaturesToMaps(num_maps=1, activate='sigmoid')
             elif key == "coordinates_DER":
                 self.heads['c']    = FeaturesToMaps(num_maps=3, activate=None)
@@ -256,6 +256,9 @@ class Depther(torch.nn.Module):
                     final_outs['logl'] = self.heads['logl'](feat)
                     final_outs['loga'] = self.heads['loga'](feat)
                     final_outs['logb'] = self.heads['logb'](feat)
+                    final_outs['mask'] = self.heads['mask'](feat)
+                elif key == "coordinates_gs_EDL":
+                    final_outs['coordinates_gs'] = self.heads['coordinates_gs'](feat)
                     final_outs['mask'] = self.heads['mask'](feat)
                 else:
                     final_outs[key] = self.heads[key](feat)

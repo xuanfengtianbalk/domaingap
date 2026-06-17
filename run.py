@@ -73,7 +73,7 @@ def build_model(config):
 
     # Create bin converter for coordinates_gs
     bc = None
-    if 'coordinates_gs' in model_config.get('TYPE', []):
+    if 'coordinates_gs' in model_config.get('TYPE', []) or 'coordinates_gs_EDL' in model_config.get('TYPE', []):
         from Hyperpose_net.losses.bin_converter import BinConverter
         bc_cfg = model_config.get('BIN_CONVERTER', {})
         bc = BinConverter(
@@ -268,7 +268,7 @@ def update_config_from_args(config: Dict, args_list: List[str]) -> Dict:
 from Hyperpose_net.losses.kp_loss import KeypointRCNNLoss
 from Hyperpose_net.losses.coors_loss import CoorsLoss, FocalLoss
 class Criterion:
-    def __init__(self, model_type, bc=None):
+    def __init__(self, model_type, bc=None, evi_loss=None, evi_cls_loss=None):
         self.model_type = model_type
         self.los_fnc = {
             'keypoints_gs': KeypointRCNNLoss(sigma=3),
@@ -276,6 +276,8 @@ class Criterion:
             'mask': nn.BCEWithLogitsLoss(),
         }
         self.bc = bc  # BinConverter for coordinates_gs
+        self.evi_loss = evi_loss
+        self.evi_cls_loss = evi_cls_loss
 
 
 
@@ -315,6 +317,34 @@ class Criterion:
                 total_loss += 0.1 * (expected ** 2).mean()
             if self.bc.use_mask:
                 total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1),target_dict['mask'])
+        if 'coordinates_DER' in self.model_type:
+            mask = (target_dict['mask'] > 0.5)
+            c    = outputs['c'].permute(0,2,3,1)[mask]
+            logl = outputs['logl'].permute(0,2,3,1)[mask]
+            loga = outputs['loga'].permute(0,2,3,1)[mask]
+            logb = outputs['logb'].permute(0,2,3,1)[mask]
+            gt   = target_dict['coordinates'].permute(0,2,3,1)[mask]
+            if c.shape[0] > 0:
+                total_loss += self.evi_loss(c, logl, loga, logb, gt)
+            total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1), target_dict['mask'])
+        if 'coordinates_gs_EDL' in self.model_type:
+            mask = (target_dict['mask'] > 0.5)
+            out = outputs['coordinates_gs']
+            total_bins = self.bc.total_bins
+            B, _, H, W = out.shape
+            logits = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # [B,H,W,3,K]
+            gt = target_dict['coordinates'].permute(0, 2, 3, 1)                # [B,H,W,3]
+            valid_logits = logits[mask]      # [N, 3, K]
+            valid_gt = gt[mask]              # [N, 3]
+            if valid_logits.shape[0] > 0:
+                for c_dim in range(3):
+                    target_probs = self.bc.value_to_bins(valid_gt[:, c_dim])
+                    total_loss += self.evi_cls_loss(valid_logits[:, c_dim, :], target_probs)
+            invalid_logits = logits[~mask]
+            if invalid_logits.shape[0] > 0:
+                probs = invalid_logits.softmax(dim=-1)
+                expected = (probs * self.bc.bin_centers).sum(dim=-1)
+                total_loss += 0.1 * (expected ** 2).mean()
         return total_loss
 
     # 也可以直接使用 __call__ 让实例像函数一样调用
