@@ -219,6 +219,12 @@ class Depther(torch.nn.Module):
             elif key == "coordinates_gs":
                 self.heads[key] = FeaturesToMaps(num_maps=output_channel, activate=activate)
                 self.heads['mask'] = FeaturesToMaps(num_maps=1, activate='sigmoid')
+            elif key == "coordinates_DER":
+                self.heads['c']    = FeaturesToMaps(num_maps=3, activate=None)
+                self.heads['logl'] = FeaturesToMaps(num_maps=3, activate=None)
+                self.heads['loga'] = FeaturesToMaps(num_maps=3, activate=None)
+                self.heads['logb'] = FeaturesToMaps(num_maps=3, activate=None)
+                self.heads['mask'] = FeaturesToMaps(num_maps=1, activate='sigmoid')
             elif key in ["softass", "keypoints_set"]:
                 # 其他类型暂时空着，用 Identity 占位
                 self.heads[key] = torch.nn.Identity()
@@ -245,10 +251,16 @@ class Depther(torch.nn.Module):
 
             final_outs = {}
             for key, feat in dec_outs.items():
-                final_outs[key] = self.heads[key](feat)
-                if key == "coordinates" or key == "coordinates_gs":
-                    # 额外添加 mask 头（使用同一个 feat）
-                    final_outs["mask"] = self.heads["mask"](feat)
+                if key == "coordinates_DER":
+                    final_outs['c']    = self.heads['c'](feat)
+                    final_outs['logl'] = self.heads['logl'](feat)
+                    final_outs['loga'] = self.heads['loga'](feat)
+                    final_outs['logb'] = self.heads['logb'](feat)
+                    final_outs['mask'] = self.heads['mask'](feat)
+                else:
+                    final_outs[key] = self.heads[key](feat)
+                    if key == "coordinates" or key == "coordinates_gs":
+                        final_outs["mask"] = self.heads["mask"](feat)
             return final_outs
 
 

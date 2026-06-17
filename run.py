@@ -470,7 +470,22 @@ def main():
         valid_losses=[]
         train_losses=[]
 
-        criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc)
+        evi_loss = None
+        evi_cls_loss = None
+        if 'coordinates_DER' in config['MODEL']['TYPE']:
+            from Hyperpose_net.losses.evidential_loss import EvidentialLossSumOfSquares
+            evi_cfg = config.get('EVIDENTIAL', {})
+            evi_loss = EvidentialLossSumOfSquares(
+                lamb=float(evi_cfg.get('lamb', 1e-3)),
+                active=evi_cfg.get('active', 'exp'),
+                use_gs=evi_cfg.get('use_gs', False))
+        if 'coordinates_gs_EDL' in config['MODEL']['TYPE']:
+            from Hyperpose_net.losses.evidential_loss import EvidentialClassificationLoss
+            evi_cls_cfg = config.get('EVIDENTIAL_CLS', {})
+            evi_cls_loss = EvidentialClassificationLoss(
+                lamb=float(evi_cls_cfg.get('lamb', 1e-3)))
+
+        criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc, evi_loss=evi_loss, evi_cls_loss=evi_cls_loss)
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
 
@@ -510,21 +525,21 @@ def main():
             torch.save(model.state_dict(), end_path_name+'/model_final.pth')
 
             print('testing on sunlamp...')
-            result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            result_dict = eval_one_epoch(model, sunlamp_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc, evi_cls_threshold=config.get("EVIDENTIAL_CLS", {}).get("threshold", 0.0), evi_threshold=config.get("EVIDENTIAL", {}).get("threshold", 0.0))
             for name, data in result_dict.items():
                 file_path = f"{end_path_name}/sunlamp_result_{name}.json"
                 with open(file_path, 'w') as f:
                     json.dump(data, f)
 
             print('testing on lightbox...')
-            result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            result_dict = eval_one_epoch(model, lightbox_loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc, evi_cls_threshold=config.get("EVIDENTIAL_CLS", {}).get("threshold", 0.0), evi_threshold=config.get("EVIDENTIAL", {}).get("threshold", 0.0))
             for name, data in result_dict.items():
                 file_path = f"{end_path_name}/lightbox_result_{name}.json"
                 with open(file_path, 'w') as f:
                     json.dump(data, f)
 
             print('testing on validation...')
-            result_dict = eval_one_epoch(model, val_loader_eval, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            result_dict = eval_one_epoch(model, val_loader_eval, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc, evi_cls_threshold=config.get("EVIDENTIAL_CLS", {}).get("threshold", 0.0), evi_threshold=config.get("EVIDENTIAL", {}).get("threshold", 0.0))
             for name, data in result_dict.items():
                 file_path = f"{end_path_name}/validation_result_{name}.json"
                 with open(file_path, 'w') as f:
@@ -537,7 +552,7 @@ def main():
             dataset = build_dataset(config, mode)
             loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
             criterion = KeypointRCNNLoss(sigma=3)
-            result_dict = eval_one_epoch(model, loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc)
+            result_dict = eval_one_epoch(model, loader, config['MODEL']['TYPE'], criterion, Camera.K, device, bc=bc, evi_cls_threshold=config.get("EVIDENTIAL_CLS", {}).get("threshold", 0.0), evi_threshold=config.get("EVIDENTIAL", {}).get("threshold", 0.0))
             for name, data in result_dict.items():
                 with open(f'{end_path_name}/{mode}_result_{name}.json', 'w') as f:
                     json.dump(data, f)

@@ -18,6 +18,16 @@ MODEL:
     lora_rank: 4
     vpt_n_prompts: 10
 
+EVIDENTIAL:
+  lamb: 0.001
+  use_gs: false
+  active: exp
+  threshold: 0.0
+
+EVIDENTIAL_CLS:
+  lamb: 0.001
+  threshold: 0.0
+
 TRAIN:
   LR: 5e-4
   OPTIM: 'AdamW'

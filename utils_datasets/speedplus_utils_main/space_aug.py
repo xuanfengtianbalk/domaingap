@@ -8,7 +8,7 @@ warnings.filterwarnings('ignore', message='Error fetching version info')
 import torch
 import numpy as np
 import albumentations as A
-
+import cv2
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 _stylaug = None
 
@@ -44,7 +44,7 @@ class SpaceAugTransform:
                              additional_targets={'mask': 'mask', 'coors': 'mask'})
 
         if t == 'augbaseline':
-            import cv2
+
             return A.Compose([
                 A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
                                    border_mode=cv2.BORDER_CONSTANT, fill=0),
@@ -83,6 +83,10 @@ class SpaceAugTransform:
             additional_targets={'mask':'mask','coors':'mask'})
 
     def _augmix(self):
+        g_geom = A.Compose([
+            # A.ShiftScaleRotate(shift_limit=0.0, scale_limit=0.0, rotate_limit=45, p=1,
+            #                    border_mode=0, fill=0)
+        ], p=1)  # 0=cv2.BORDER_CONSTANT
         g_brightness = A.Compose([
             A.SomeOf([A.RandomBrightnessContrast(0.3,0.3,p=1),A.InvertImg(p=1),
                        A.MultiplicativeNoise((0.9,1.1),p=1),
@@ -93,13 +97,13 @@ class SpaceAugTransform:
                        A.Sharpen(p=1),A.Emboss(p=1),
                        A.CLAHE(clip_limit=2.0,tile_grid_size=(8,8),p=1)],n=2,p=1)],p=1)
         g_corrupt = A.Compose([
-            A.SomeOf([A.GaussNoise((0.01,0.05),p=1),A.ISONoise(p=1),
+            A.SomeOf([ A.GaussNoise((0.01,0.05),p=1),A.ISONoise(p=1),
                        A.RandomFog(0.2,p=1),A.RandomSnow(0.2,p=1),
                        A.RandomSunFlare((0,0,1,0.5),src_radius=200,p=1)],n=2,p=1)],p=1)
         g_general = A.Compose([
             A.SomeOf([A.CoarseDropout(num_holes_range=(1,8),p=1),A.PixelDropout(0.02,p=1),
                        A.Superpixels(p_replace=0.1,n_segments=100,p=1)],n=2,p=1)],p=1)
-        return A.Compose([g_brightness,g_blur,g_corrupt,g_general],
+        return A.Compose([g_geom, g_brightness,g_blur,g_corrupt,g_general],
             keypoint_params=A.KeypointParams(format='xy',remove_invisible=False),
             additional_targets={'mask':'mask','coors':'mask'})
 
