@@ -152,7 +152,11 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 continue
             compute_fn = metric_modules[metric_name].compute
 
-            if conditions_enabled and len(conditions_enabled) > 0:
+            no_cond = getattr(metric_modules[metric_name], 'NO_CONDITIONS', False)
+
+            if no_cond:
+                result = compute_fn(stats)
+            elif conditions_enabled and len(conditions_enabled) > 0:
                 result = cond_analyzer.compute_all(compute_fn, stats, enabled=conditions_enabled)
                 result["_condition_info"] = cond_analyzer.get_threshold_info()
             else:
@@ -186,5 +190,14 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "epi_winrate":
                     from visualization.plots import plot_epi_winrate
                     plot_epi_winrate(stats, split, out_dir=viz_dir)
+                elif viz_name == "calibration_error":
+                    from visualization.plots import plot_calibration_error
+                    plot_calibration_error(stats, split, out_dir=viz_dir)
+                elif viz_name == "calibration_gain":
+                    from visualization.plots import plot_calibration_gain
+                    plot_calibration_gain(stats, split, out_dir=viz_dir)
+                elif viz_name == "threshold_sweep":
+                    from visualization.plots import plot_threshold_sweep
+                    plot_threshold_sweep(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

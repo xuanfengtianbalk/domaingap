@@ -20,6 +20,7 @@ metrics:
   - error_gain
   - per_axis
   - fusion
+  - calibration
 
 # Conditions to apply to all metrics
 conditions:
@@ -33,3 +34,6 @@ visualization:
   - scatter
   - histogram
   - epi_winrate
+  - calibration_error
+  - calibration_gain
+  - threshold_sweep
