@@ -20,7 +20,6 @@ MODEL:
 
 EVIDENTIAL:
   lamb: 0.001
-  use_gs: false
   active: exp
   threshold: 0.0
 

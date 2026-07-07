@@ -1,0 +1,39 @@
+{
+  "overall": {
+    "cosine_similarity_mean": 0.8999268412590027,
+    "cosine_similarity_std": 0.2581465244293213,
+    "sign_agreement_x": 0.9169771795067814,
+    "sign_agreement_y": 0.9190823828656013,
+    "sign_agreement_z": 0.7619384704506554,
+    "n_pixels": 69812733
+  },
+  "low_epi": {
+    "cosine_similarity_mean": 0.979007363319397,
+    "cosine_similarity_std": 0.12645165622234344,
+    "sign_agreement_x": 0.9598070630685502,
+    "sign_agreement_y": 0.9687383156029277,
+    "sign_agreement_z": 0.7660285728894989,
+    "n_pixels": 23038202
+  },
+  "mid_epi": {
+    "cosine_similarity_mean": 0.952498733997345,
+    "cosine_similarity_std": 0.1858455389738083,
+    "sign_agreement_x": 0.9435855231745536,
+    "sign_agreement_y": 0.9518783585523175,
+    "sign_agreement_z": 0.7826356659808492,
+    "n_pixels": 23038200
+  },
+  "high_epi": {
+    "cosine_similarity_mean": 0.772146463394165,
+    "cosine_similarity_std": 0.34910786151885986,
+    "sign_agreement_x": 0.8495812600523645,
+    "sign_agreement_y": 0.8390555389541879,
+    "sign_agreement_z": 0.7378802140903747,
+    "n_pixels": 23736331
+  },
+  "_condition_info": {
+    "low_epi": "epi_std < 0.000066",
+    "mid_epi": "epi_std \u2208 [0.000066, 0.000497)",
+    "high_epi": "epi_std >= 0.000497"
+  }
+}

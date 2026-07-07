@@ -79,6 +79,7 @@ def eval_one_epoch_visualization(
     num_samples: int = 10,
     max_batches: Optional[int] = None,
     bc = None,  # BinConverter for coordinates_gs
+    evi_cls_threshold = 0.0,  # EDL uncertainty threshold
 ) -> List[np.ndarray]:
     """
     仅进行前向推理，收集原图、标签和网络输出，生成可视化图像列表。
@@ -232,7 +233,34 @@ def eval_one_epoch_visualization(
                     collected_images.append(img_arr)
                     plt.close(fig)
 
-                if 'coordinates_gs' in model_type or 'coordinates_gs_EDL' in model_type and bc is not None:
+                if 'coordinates_gs_EDL' in model_type and bc is not None:
+                    import torch.nn.functional as F
+                    out = outputs['coordinates_gs'][b]  # (3*total_bins, H, W)
+                    total_bins = bc.total_bins
+                    out = out.view(3, total_bins, 256, 256).permute(2, 3, 0, 1)  # (256, 256, 3, total_bins)
+                    probs = F.softmax(out, dim=-1)
+                    coords_np = bc.bins_to_value(probs)  # (256, 256, 3) numpy
+                    coords_vis = (coords_np - np.nanmin(coords_np)) / (np.nanmax(coords_np) - np.nanmin(coords_np) + 1e-8)
+
+                    if bc.use_mask and 'mask' in outputs:
+                        mask_bool = (activate(outputs['mask'][b]) > 0.5).cpu().numpy().squeeze()
+                    else:
+                        mask_bool = np.all(np.isfinite(coords_np), axis=-1)
+
+                    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                    axes[0].imshow(img_resized)
+                    axes[0].set_title('Input'); axes[0].axis('off')
+                    axes[1].imshow(coords_vis)
+                    axes[1].set_title('EDL Coords'); axes[1].axis('off')
+                    axes[2].imshow(mask_bool, cmap='gray')
+                    axes[2].set_title('Mask'); axes[2].axis('off')
+
+                    fig.canvas.draw()
+                    img_arr = np.array(fig.canvas.buffer_rgba())[:, :, :3]
+                    collected_images.append(img_arr)
+                    plt.close(fig)
+
+                if 'coordinates_gs' in model_type and bc is not None:
                     import torch.nn.functional as F
                     out = outputs['coordinates_gs'][b]  # (3*total_bins, H, W)
                     total_bins = bc.total_bins

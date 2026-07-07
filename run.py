@@ -210,13 +210,7 @@ def update_config_from_args(config: Dict, args_list: List[str]) -> Dict:
 
     # 2. 类型转换函数（根据原值类型或自动检测）
     def convert_value(value_str: str, ref_value: Any = None) -> Any:
-        # 布尔值处理
-        if value_str.lower() in ('true', 'yes', '1'):
-            return True
-        if value_str.lower() in ('false', 'no', '0'):
-            return False
-
-        # 有参考值时按参考类型转换
+        # 有参考值时按参考类型转换（必须在自动检测之前）
         if ref_value is not None:
             if isinstance(ref_value, bool):
                 return value_str.lower() in ('true', 'yes', '1')
@@ -224,10 +218,14 @@ def update_config_from_args(config: Dict, args_list: List[str]) -> Dict:
                 return int(value_str)
             if isinstance(ref_value, float):
                 return float(value_str)
-            # 其他类型（str, list等）保留字符串
             return value_str
 
         # 无参考值：自动检测
+        if value_str.lower() in ('true', 'yes', '1'):
+            return True
+        if value_str.lower() in ('false', 'no', '0'):
+            return False
+
         try:
             return int(value_str)
         except ValueError:
@@ -507,8 +505,7 @@ def main():
             evi_cfg = config.get('EVIDENTIAL', {})
             evi_loss = EvidentialLossSumOfSquares(
                 lamb=float(evi_cfg.get('lamb', 1e-3)),
-                active=evi_cfg.get('active', 'exp'),
-                use_gs=evi_cfg.get('use_gs', False))
+                active=evi_cfg.get('active', 'exp'))
         if 'coordinates_gs_EDL' in config['MODEL']['TYPE']:
             from Hyperpose_net.losses.evidential_loss import EvidentialClassificationLoss
             evi_cls_cfg = config.get('EVIDENTIAL_CLS', {})
@@ -594,7 +591,7 @@ def main():
         model.eval()
         with torch.no_grad():
             from vis import eval_one_epoch_visualization
-            vis_images = eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device, bc=bc)
+            vis_images = eval_one_epoch_visualization(model, vis_loader, config['MODEL']['TYPE'], device, bc=bc, evi_cls_threshold=config.get('EVIDENTIAL_CLS', {}).get('threshold', 0.0))
             import os as _os; _os.makedirs('visuals', exist_ok=True)
             save_dir = f'visuals/{args.resume_path}'
             _os.makedirs(save_dir, exist_ok=True)

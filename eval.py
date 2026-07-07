@@ -130,7 +130,10 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None,
                 if evi_threshold > 0:
                     coormap_masked[std > evi_threshold] = float('nan')
                 print('test of coordinates_DER')
-                is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, to_pnp_coors(coormap_masked.squeeze()), gtbbox.cpu().detach().numpy())
+                try:
+                    is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, to_pnp_coors(coormap_masked.squeeze()), gtbbox.cpu().detach().numpy())
+                except:
+                    is_true, coors_qvecs, coors_tvecs = False, None, None
                 err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(
                     coors_qvecs, coors_tvecs, qgt, rgt, is_true)
                 result_dict = {'err_ori': err_ori_deg.tolist(), 'los_r': err_r_abs.tolist()}
@@ -156,29 +159,17 @@ def eval_one_epoch(model, dataloader, model_type, criterion, K, device, bc=None,
                 result_dicts['coordinates_gs'].append(result_dict)
 
             if 'coordinates_gs_EDL' in model_type and bc is not None:
-                from Hyperpose_net.losses.evidential_loss import compute_cls_uncertainty
                 out = outputs['coordinates_gs'].detach()
                 B, _, H, W = out.shape
                 total_bins = bc.total_bins
-                logits = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)  # [B,H,W,3,K]
-
-                alpha = F.softplus(logits) + 1.0
-                S = alpha.sum(-1, keepdim=True)
-                probs = alpha / (S + 1e-8)                                        # [B,H,W,3,K]
+                out = out.view(B, 3, total_bins, H, W).permute(0, 3, 4, 1, 2)
+                probs = F.softmax(out, dim=-1)
                 coormap_np = bc.bins_to_value(probs)
                 coormap_value = torch.from_numpy(np.transpose(coormap_np, (0, 3, 1, 2))).float().to(device)
-
-                # uncertainty threshold filtering
-                uncert = total_bins / (S.squeeze(-1) + 1e-8)                      # [B,H,W,3]
-                # model mask
-                if 'mask' in outputs:
+                if bc.use_mask and 'mask' in outputs:
                     mask_bool_est_ = activate(outputs['mask']) > 0.5
                     mask_bool_est = mask_bool_est_.expand_as(coormap_value).cpu()
                     coormap_value[~mask_bool_est] = float('nan')
-                # uncertainty threshold filtering
-                if evi_cls_threshold > 0:
-                    coormap_value[uncert > evi_cls_threshold] = float('nan')
-
                 print('test of coordinates_gs_EDL')
                 is_true, coors_qvecs, coors_tvecs = pose_calculats_from_coors(K, to_pnp_coors(coormap_value.squeeze()), gtbbox.cpu().numpy())
                 err_ori_deg, err_r_rel, err_r_abs, err_pose, inc_fail_miss, good_pose = compute_pose_error(

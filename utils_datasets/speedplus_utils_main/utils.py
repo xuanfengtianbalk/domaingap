@@ -520,6 +520,7 @@ if has_pytorch:
 
             elif split in {'sunlamp','lightbox'}:
                 self.image_root = os.path.join(speed_root, split, 'images')
+                self.depth_root = os.path.join(speed_root, split, 'depth')
                 with open(os.path.join(speed_root, split, 'test.json'), 'r') as f:
                     label_list = json.load(f)
 
@@ -766,6 +767,22 @@ if has_pytorch:
                 target_dict["mask_gt"] = torch.tensor(new_mask)
             else:
                 trans_image = self.transform(image=resized_img, keypoints=kp_trans)
+                # sunlamp/lightbox: compute coors_gt from depth, no augmentation
+                if self.split in ('sunlamp', 'lightbox'):
+                    depth_path = os.path.join(self.depth_root, sample_id[:-4] + '0001.exr')
+                    coors = self.get_coors(depth_path, pose=[r[0], r[1], r[2], q[0], q[1], q[2], q[3]])
+                    mask = np.all(np.isfinite(coors), axis=0)
+                    cx1_o, cx2_o = max(x1, 0), min(x2, W_o)
+                    cy1_o, cy2_o = max(y1, 0), min(y2, H_o)
+                    coors_crop = coors[:, cy1_o:cy2_o, cx1_o:cx2_o]
+                    mask_crop = mask[cy1_o:cy2_o, cx1_o:cx2_o]
+                    coors_resized = np.transpose(cv2.resize(
+                        np.transpose(coors_crop, (1, 2, 0)), (256, 256),
+                        interpolation=cv2.INTER_NEAREST), (2, 0, 1))
+                    mask_resized = cv2.resize(mask_crop.astype(np.uint8), (256, 256),
+                                              interpolation=cv2.INTER_NEAREST)
+                    target_dict["coors_gt"] = torch.tensor(coors_resized)
+                    target_dict["mask_gt"] = torch.tensor(mask_resized)
             kp = trans_image['keypoints']
             final_image = self.transform.apply_norm(trans_image['image'])
 

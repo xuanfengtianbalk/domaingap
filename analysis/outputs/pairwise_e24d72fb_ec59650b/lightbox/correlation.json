@@ -1,0 +1,35 @@
+{
+  "overall": {
+    "pearson_r": 0.8391653299331665,
+    "pearson_p": 0.0,
+    "spearman_r": 0.8764950763651376,
+    "spearman_p": 0.0,
+    "n": 2466641
+  },
+  "low_epi": {
+    "pearson_r": 0.9861307740211487,
+    "pearson_p": 0.0,
+    "spearman_r": 0.9913243648834341,
+    "spearman_p": 0.0,
+    "n": 813992
+  },
+  "mid_epi": {
+    "pearson_r": 0.9633277654647827,
+    "pearson_p": 0.0,
+    "spearman_r": 0.9706231082178385,
+    "spearman_p": 0.0,
+    "n": 813991
+  },
+  "high_epi": {
+    "pearson_r": 0.6120439171791077,
+    "pearson_p": 0.0,
+    "spearman_r": 0.5920792802584124,
+    "spearman_p": 0.0,
+    "n": 838658
+  },
+  "_condition_info": {
+    "low_epi": "epi_std < 0.000039",
+    "mid_epi": "epi_std \u2208 [0.000039, 0.000215)",
+    "high_epi": "epi_std >= 0.000215"
+  }
+}
