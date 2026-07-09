@@ -202,20 +202,17 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "fusion_summary":
                     from visualization.plots import plot_fusion_summary
                     plot_fusion_summary(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_pearson_vs_epi":
-                    from visualization.plots import plot_bias_pearson_vs_epi
-                    plot_bias_pearson_vs_epi(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_magnitude_vs_epi":
-                    from visualization.plots import plot_bias_magnitude_vs_epi
-                    plot_bias_magnitude_vs_epi(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_drift":
-                    from visualization.plots import plot_bias_drift
-                    plot_bias_drift(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_combined":
-                    from visualization.plots import plot_bias_combined
-                    plot_bias_combined(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_angle_vs_epi":
-                    from visualization.plots import plot_bias_angle_vs_epi
-                    plot_bias_angle_vs_epi(stats, split, out_dir=viz_dir)
+                elif viz_name == "sign_agreement":
+                    from visualization.plots import plot_sign_agreement
+                    plot_sign_agreement(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_magnitude":
+                    from visualization.plots import plot_bias_magnitude
+                    plot_bias_magnitude(stats, split, out_dir=viz_dir)
+                elif viz_name == "disagreement_ratio":
+                    from visualization.plots import plot_disagreement_ratio
+                    plot_disagreement_ratio(stats, split, out_dir=viz_dir)
+                elif viz_name == "gt_conditioned":
+                    from visualization.plots import plot_gt_conditioned
+                    plot_gt_conditioned(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

@@ -1,12 +1,9 @@
-"""Bias analysis: statistical validation before modelling.
+"""Per-axis bias analysis — x, y, z independently, 100 percentile bins.
 
-Four analyses:
-  1. bias_correlation  — corr(bias_DER, bias_gs) per decile
-  2. bias_magnitude    — E(|bias| | u_epi) per ventile
-  3. signed_bias       — E(bias_x/y/z | u_epi) per ventile
-  4. bias_angle        — arccos(e_DER · e_GS / |e_DER||e_GS|) per ventile
-
-Output: bias_analysis.json (combined)
+  1. sign_agreement     — fraction of pixels where bias_DER and bias_gs share sign
+  2. bias_magnitude     — mean, var, p25/p50/p75 of |bias| per bin
+  3. disagreement_ratio — |DER-gs|/|bias_DER|, |DER-gs|/|bias_gs| per bin
+  4. gt_conditioned     — mean/var bias per GT coordinate range
 """
 
 from __future__ import annotations
@@ -16,155 +13,118 @@ from metrics.accumulator import StatsAccumulator
 NO_CONDITIONS = True
 
 
-def _decile_corr(stats: StatsAccumulator) -> dict:
-    """Pearson r between bias_DER and bias_gs, per decile of epi_std."""
-    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
-        return {"error": "no epi_var_A"}
+def _axis_analysis(epi, diff_a, diff_b, gt, axis_idx: int) -> dict:
+    da = diff_a[:, axis_idx]    # bias_DER per axis  (N,)
+    db = diff_b[:, axis_idx]    # bias_gs  per axis
+    gt_axis = gt[:, axis_idx]   # GT per axis
 
-    epi = stats.epi_var_A.flatten()
-    diff_a = stats.diff_A   # (N, 3)  coords_A - GT
-    diff_b = stats.diff_B   # (N, 3)  coords_B - GT
+    # ── 100 percentile bins ──
+    edges = np.percentile(epi, np.linspace(0, 100, 101))
+    edges = np.unique(np.round(edges, 10))
+    n_bins = len(edges) - 1
+    pct_centers = [(i + 0.5) * (100.0 / n_bins) for i in range(n_bins)]
 
-    bias_norm_a = np.linalg.norm(diff_a, axis=1)
-    bias_norm_b = np.linalg.norm(diff_b, axis=1)
+    # ── 1. sign agreement ──
+    sign_agree = []
+    for i, (lo, hi) in enumerate(zip(edges[:n_bins], edges[1:])):
+        m = (epi >= lo) & (epi < hi)
+        n = m.sum()
+        if n < 3:
+            sign_agree.append({"pct": pct_centers[i], "frac": None, "n": 0})
+            continue
+        same_sign = ((da[m] > 0) & (db[m] > 0)) | ((da[m] < 0) & (db[m] < 0))
+        sign_agree.append({
+            "pct":   pct_centers[i],
+            "frac":  float(same_sign.mean()),
+            "n":     int(n),
+        })
 
-    edges = np.percentile(epi, np.linspace(0, 100, 11))
-    names = [f"p{lo}-p{hi}" for lo, hi in zip(range(0, 100, 10), range(10, 110, 10))]
+    # ── 2. bias magnitude distribution ──
+    bias_mag = []
+    for i, (lo, hi) in enumerate(zip(edges[:n_bins], edges[1:])):
+        m = (epi >= lo) & (epi < hi)
+        n = m.sum()
+        if n < 3:
+            bias_mag.append({"pct": pct_centers[i], "n": 0})
+            continue
+        ada, adb = np.abs(da[m]), np.abs(db[m])
+        bias_mag.append({
+            "pct":       pct_centers[i],
+            "n":         int(n),
+            "mean_DER":  float(ada.mean()),  "var_DER": float(ada.var()),
+            "p25_DER":   float(np.percentile(ada, 25)),
+            "p50_DER":   float(np.percentile(ada, 50)),
+            "p75_DER":   float(np.percentile(ada, 75)),
+            "mean_gs":   float(adb.mean()),  "var_gs":  float(adb.var()),
+            "p25_gs":    float(np.percentile(adb, 25)),
+            "p50_gs":    float(np.percentile(adb, 50)),
+            "p75_gs":    float(np.percentile(adb, 75)),
+        })
 
-    overall = {
-        "pearson_r":   float(np.corrcoef(bias_norm_a, bias_norm_b)[0, 1]),
-        "axis_x":      float(np.corrcoef(diff_a[:, 0], diff_b[:, 0])[0, 1]),
-        "axis_y":      float(np.corrcoef(diff_a[:, 1], diff_b[:, 1])[0, 1]),
-        "axis_z":      float(np.corrcoef(diff_a[:, 2], diff_b[:, 2])[0, 1]),
-        "n":           int(len(epi)),
-    }
+    # ── 3. disagreement ratio ──
+    eps = 1e-12
+    disagree = []
+    for i, (lo, hi) in enumerate(zip(edges[:n_bins], edges[1:])):
+        m = (epi >= lo) & (epi < hi)
+        n = m.sum()
+        if n < 3:
+            disagree.append({"pct": pct_centers[i], "n": 0})
+            continue
+        ratio_der = np.abs(da[m] - db[m]) / (np.abs(da[m]) + eps)
+        ratio_gs  = np.abs(da[m] - db[m]) / (np.abs(db[m]) + eps)
+        disagree.append({
+            "pct":            pct_centers[i],
+            "n":              int(n),
+            "mean_vs_DER":    float(ratio_der.mean()),
+            "var_vs_DER":     float(ratio_der.var()),
+            "p25_vs_DER":     float(np.percentile(ratio_der, 25)),
+            "p50_vs_DER":     float(np.percentile(ratio_der, 50)),
+            "p75_vs_DER":     float(np.percentile(ratio_der, 75)),
+            "mean_vs_gs":     float(ratio_gs.mean()),
+            "var_vs_gs":      float(ratio_gs.var()),
+            "p25_vs_gs":      float(np.percentile(ratio_gs, 25)),
+            "p50_vs_gs":      float(np.percentile(ratio_gs, 50)),
+            "p75_vs_gs":      float(np.percentile(ratio_gs, 75)),
+        })
 
-    by_decile = {}
-    for i, name in enumerate(names):
-        lo, hi = edges[i], edges[i + 1]
-        m = (epi >= lo) & (epi < hi) if hi < np.inf else (epi >= lo)
+    # ── 4. GT-conditioned bias ──
+    gt_min, gt_max = gt_axis.min(), gt_axis.max()
+    gt_edges = np.linspace(gt_min, gt_max, 21)   # 20 equal-width bins
+    gt_conditioned = []
+    for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
+        m = (gt_axis >= lo) & (gt_axis < hi)
         n = m.sum()
         if n < 3:
             continue
-        by_decile[name] = {
-            "epi_lo":       float(lo),
-            "epi_hi":       float(hi) if hi < np.inf else "inf",
-            "pearson_r":    float(np.corrcoef(bias_norm_a[m], bias_norm_b[m])[0, 1]),
-            "axis_x":       float(np.corrcoef(diff_a[m, 0], diff_b[m, 0])[0, 1]),
-            "axis_y":       float(np.corrcoef(diff_a[m, 1], diff_b[m, 1])[0, 1]),
-            "axis_z":       float(np.corrcoef(diff_a[m, 2], diff_b[m, 2])[0, 1]),
-            "n":            int(n),
-        }
-
-    return {"overall": overall, "by_decile": by_decile}
-
-
-def _ventile_stats(stats: StatsAccumulator, field: str) -> dict:
-    """Binned mean of |bias| or signed bias_x/y/z, 20 bins of epi_std."""
-    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
-        return {"error": "no epi_var_A"}
-
-    epi = stats.epi_var_A.flatten()
-    diff_a = stats.diff_A
-    diff_b = stats.diff_B
-
-    edges = np.percentile(epi, np.linspace(0, 100, 21))
-    edges = np.unique(np.round(edges, 8))
-
-    bins = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (epi >= lo) & (epi < hi)
-        n = m.sum()
-        if n < 10:
-            continue
-
-        if field == "magnitude":
-            entry = {
-                "epi_lo": float(lo), "epi_hi": float(hi),
-                "epi_mean": float(epi[m].mean()), "n": int(n),
-                "|bias|_DER": float(np.linalg.norm(diff_a[m], axis=1).mean()),
-                "|bias|_gs":  float(np.linalg.norm(diff_b[m], axis=1).mean()),
-            }
-        else:  # signed
-            entry = {
-                "epi_lo": float(lo), "epi_hi": float(hi),
-                "epi_mean": float(epi[m].mean()), "n": int(n),
-                "bias_x_DER": float(diff_a[m, 0].mean()),
-                "bias_y_DER": float(diff_a[m, 1].mean()),
-                "bias_z_DER": float(diff_a[m, 2].mean()),
-                "bias_x_gs":  float(diff_b[m, 0].mean()),
-                "bias_y_gs":  float(diff_b[m, 1].mean()),
-                "bias_z_gs":  float(diff_b[m, 2].mean()),
-                "std_x_DER":  float(diff_a[m, 0].std()),
-                "std_y_DER":  float(diff_a[m, 1].std()),
-                "std_z_DER":  float(diff_a[m, 2].std()),
-                "std_x_gs":   float(diff_b[m, 0].std()),
-                "std_y_gs":   float(diff_b[m, 1].std()),
-                "std_z_gs":   float(diff_b[m, 2].std()),
-            }
-        bins.append(entry)
-
-    return {"bins": bins, "n_total": int(len(epi))}
-
-
-def _angle_stats(stats: StatsAccumulator) -> dict:
-    """arccos(e_DER · e_GS / |e_DER||e_GS|) per ventile — angle between error vectors."""
-    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
-        return {"error": "no epi_var_A"}
-
-    epi = stats.epi_var_A.flatten()
-    diff_a = stats.diff_A
-    diff_b = stats.diff_B
-
-    norm_a = np.linalg.norm(diff_a, axis=1)
-    norm_b = np.linalg.norm(diff_b, axis=1)
-    dot = (diff_a * diff_b).sum(axis=1)
-    denom = norm_a * norm_b
-
-    valid = (norm_a > 1e-12) & (norm_b > 1e-12)
-    cos_sim = np.full_like(dot, np.nan)
-    cos_sim[valid] = np.clip(dot[valid] / denom[valid], -1.0, 1.0)
-    angle_deg = np.rad2deg(np.arccos(np.clip(cos_sim, -1.0, 1.0)))
-
-    overall_valid = valid
-    overall = {
-        "mean_angle_deg": float(np.nanmean(angle_deg[overall_valid])),
-        "mean_cos_sim":   float(np.nanmean(cos_sim[overall_valid])),
-        "n_valid":        int(overall_valid.sum()),
-        "n_total":        int(len(epi)),
-    }
-
-    edges = np.percentile(epi, np.linspace(0, 100, 21))
-    edges = np.unique(np.round(edges, 8))
-
-    bins = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (epi >= lo) & (epi < hi)
-        n = m.sum()
-        if n < 10:
-            continue
-        vm = m & valid
-        nv = vm.sum()
-        if nv < 3:
-            continue
-        bins.append({
-            "epi_lo":         float(lo),
-            "epi_hi":         float(hi),
-            "epi_mean":       float(epi[m].mean()),
+        gt_conditioned.append({
+            "gt_lo":          float(lo),
+            "gt_hi":          float(hi),
             "n":              int(n),
-            "n_valid":        int(nv),
-            "mean_angle_deg": float(np.mean(angle_deg[vm])),
-            "std_angle_deg":  float(np.std(angle_deg[vm])),
-            "mean_cos_sim":   float(np.mean(cos_sim[vm])),
+            "mean_bias_DER":  float(da[m].mean()),
+            "var_bias_DER":   float(da[m].var()),
+            "mean_bias_gs":   float(db[m].mean()),
+            "var_bias_gs":    float(db[m].var()),
         })
 
-    return {"overall": overall, "bins": bins}
+    return {
+        "sign_agreement":     sign_agree,
+        "bias_magnitude":     bias_mag,
+        "disagreement_ratio": disagree,
+        "gt_conditioned":     gt_conditioned,
+    }
 
 
 def compute(stats: StatsAccumulator) -> dict:
+    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
+        return {"error": "no epi_var_A"}
+
+    epi = stats.epi_var_A.flatten()
+    da = stats.diff_A    # (N, 3)  DER - GT
+    db = stats.diff_B    # (N, 3)  gs  - GT
+    gt = stats.coord_gt
+
     return {
-        "bias_correlation":  _decile_corr(stats),
-        "bias_magnitude":    _ventile_stats(stats, "magnitude"),
-        "signed_bias":       _ventile_stats(stats, "signed"),
-        "bias_angle":        _angle_stats(stats),
+        "x": _axis_analysis(epi, da, db, gt, 0),
+        "y": _axis_analysis(epi, da, db, gt, 1),
+        "z": _axis_analysis(epi, da, db, gt, 2),
     }

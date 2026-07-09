@@ -35,8 +35,7 @@ visualization:
   - calibration_gain
   - threshold_sweep
   - fusion_summary
-  - bias_pearson_vs_epi
-  - bias_magnitude_vs_epi
-  - bias_drift
-  - bias_combined
-  - bias_angle_vs_epi
+  - sign_agreement
+  - bias_magnitude
+  - disagreement_ratio
+  - gt_conditioned
