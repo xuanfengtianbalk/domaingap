@@ -218,139 +218,93 @@ def plot_threshold_sweep(stats: StatsAccumulator, split: str, out_dir: str | Non
 # ── Fusion summary: per-epi-decile MAE comparison ───────────────────────────
 
 def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Bar/line chart: MAE per epi decile for all fusion methods."""
+    """Line chart: MAE per epi decile for DER, gs, per-axis-baseline,
+    consistency-gated debiasing, full-debias upper bound."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
 
     epi = stats.epi_var_A.flatten()
-    coord_a = stats.coord_A
-    coord_b = stats.coord_B
-    gt = stats.coord_gt
+    ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
-    taus = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
-    theta_thresholds = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0]
+    edges = np.percentile(epi, np.linspace(0, 100, 21))
+    edges = np.unique(np.round(edges, 8))
 
-    # Find best τ/θ from full data first
-    # Method A
-    best_mae_a = float("inf"); best_tau_a = 0.0005
-    for tau in taus:
-        mask = epi >= tau
-        f = (coord_a + coord_b) / 2.0
-        f[mask, 0] = coord_b[mask, 0]
-        f[mask, 1] = coord_b[mask, 1]
-        f[mask, 2] = coord_a[mask, 2]
-        m = float(np.linalg.norm(f - gt, axis=1).mean())
-        if m < best_mae_a: best_mae_a = m; best_tau_a = tau
-
-    # Method B
-    na = np.linalg.norm(coord_a - gt, axis=1)
-    nb = np.linalg.norm(coord_b - gt, axis=1)
-    denom = na * nb
-    valid_t = denom > 1e-12
-    cos_t = np.ones_like(denom)
-    cos_t[valid_t] = np.clip(((coord_a - gt) * (coord_b - gt)).sum(axis=1)[valid_t] / denom[valid_t], -1.0, 1.0)
-    theta_vals = np.rad2deg(np.arccos(np.clip(cos_t, -1.0, 1.0)))
-
-    best_mae_b = float("inf"); best_thr_b = 20.0
-    for thr in theta_thresholds:
-        mask = theta_vals >= thr
-        f = (coord_a + coord_b) / 2.0
-        f[mask, 0] = coord_b[mask, 0]
-        f[mask, 1] = coord_b[mask, 1]
-        f[mask, 2] = coord_a[mask, 2]
-        m = float(np.linalg.norm(f - gt, axis=1).mean())
-        if m < best_mae_b: best_mae_b = m; best_thr_b = thr
-
-    # Method D
-    best_mae_d = float("inf"); best_tau_d = 0.0005
-    for tau in taus:
-        w = epi[:, None] / (epi[:, None] + tau)
-        f = w * coord_b + (1.0 - w) * coord_a
-        m = float(np.linalg.norm(f - gt, axis=1).mean())
-        if m < best_mae_d: best_mae_d = m; best_tau_d = tau
-
-    # Method C: table debias
-    edges_tbl = np.percentile(epi, np.linspace(0, 100, 21))
-    edges_tbl = np.unique(np.round(edges_tbl, 8))
-    t_der = np.zeros((len(edges_tbl) - 1, 3))
-    t_gs = np.zeros((len(edges_tbl) - 1, 3))
-    cnt = np.zeros(len(edges_tbl) - 1)
-    for i, (lo, hi) in enumerate(zip(edges_tbl[:-1], edges_tbl[1:])):
-        m = (epi >= lo) & (epi < hi); n = m.sum()
-        if n < 3: continue
-        t_der[i] = (coord_a[m] - gt[m]).mean(axis=0)
-        t_gs[i]  = (coord_b[m] - gt[m]).mean(axis=0)
-        cnt[i] = n
-    da_db = coord_a.copy(); db_db = coord_b.copy()
-    for i, (lo, hi) in enumerate(zip(edges_tbl[:-1], edges_tbl[1:])):
-        if cnt[i] < 3: continue
+    # Build tables
+    consistency = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
         m = (epi >= lo) & (epi < hi)
-        da_db[m] -= t_der[i][None, :]
-        db_db[m] -= t_gs[i][None, :]
+        n = m.sum()
+        if n < 3:
+            consistency.append(None)
+            continue
+        da, db = ca[m] - gt[m], cb[m] - gt[m]
+        na, nb = np.linalg.norm(da, axis=1), np.linalg.norm(db, axis=1)
+        denom = na * nb
+        valid = denom > 1e-12
+        cs = np.ones(n); cs[valid] = np.clip((da[valid] * db[valid]).sum(axis=1) / denom[valid], -1.0, 1.0)
+        consistency.append(float(cs.mean()))
 
-    # Per-decile MAE table
+    # Debiased matrices
+    da_db, db_db = ca.copy(), cb.copy()
+    for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        m = (epi >= lo) & (epi < hi)
+        if m.sum() < 3: continue
+        da_db[m] -= (ca[m] - gt[m]).mean(axis=0)
+        db_db[m] -= (cb[m] - gt[m]).mean(axis=0)
+
     dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
-    names = [f"{lo}-{hi}" for lo, hi in zip(range(0, 100, 10), range(10, 110, 10))]
-    dec_centers = [i * 10 + 5 for i in range(10)]
+    pct_centers = [(i * 10 + (i + 1) * 10) / 2 for i in range(10)]
 
-    methods = {}  # {label: [mae_per_decile]}
-    for method_name in ["DER", "gs", "avg", "gated", "pat", "theta", "ew", "der_db", "gs_db"]:
-        methods[method_name] = []
+    methods = {"DER": [], "gs": [], "avg": [], "per_axis": [], "full_db": [], "cons_gate": []}
 
-    lo_p33, hi_p66 = np.percentile(epi, [33, 66])
     for i in range(10):
-        lo_d, hi_d = dec_edges[i], dec_edges[i + 1]
-        m = (epi >= lo_d) & (epi < hi_d) if i < 10 else (epi >= lo_d)
+        lo, hi = dec_edges[i], dec_edges[i + 1]
+        m = (epi >= lo) & (epi < hi)
         if m.sum() < 10:
             for k in methods: methods[k].append(float("nan"))
             continue
-        ca, cb, gm, em = coord_a[m], coord_b[m], gt[m], epi[m]
+        ci, cj, gm, em = ca[m], cb[m], gt[m], epi[m]
 
-        methods["DER"].append(float(np.linalg.norm(ca - gm, axis=1).mean()))
-        methods["gs"].append(float(np.linalg.norm(cb - gm, axis=1).mean()))
-        methods["avg"].append(float(np.linalg.norm((ca + cb) / 2.0 - gm, axis=1).mean()))
+        methods["DER"].append(float(np.linalg.norm(ci - gm, axis=1).mean()))
+        methods["gs"].append(float(np.linalg.norm(cj - gm, axis=1).mean()))
+        methods["avg"].append(float(np.linalg.norm((ci + cj) / 2.0 - gm, axis=1).mean()))
 
-        fg = np.where(em[:, None] < lo_p33, ca, np.where(em[:, None] < hi_p66, (ca + cb) / 2.0, cb))
-        methods["gated"].append(float(np.linalg.norm(fg - gm, axis=1).mean()))
+        pa = cj.copy(); pa[:, 2] = ci[:, 2]
+        methods["per_axis"].append(float(np.linalg.norm(pa - gm, axis=1).mean()))
 
-        fs_a = (ca + cb) / 2.0; ms_a = em >= best_tau_a
-        fs_a[ms_a, 0] = cb[ms_a, 0]; fs_a[ms_a, 1] = cb[ms_a, 1]; fs_a[ms_a, 2] = ca[ms_a, 2]
-        methods["pat"].append(float(np.linalg.norm(fs_a - gm, axis=1).mean()))
+        fd = (da_db[m] + db_db[m]) / 2.0
+        methods["full_db"].append(float(np.linalg.norm(fd - gm, axis=1).mean()))
 
-        tm = theta_vals[m]; ms_b = tm >= best_thr_b
-        fs_b = (ca + cb) / 2.0
-        fs_b[ms_b, 0] = cb[ms_b, 0]; fs_b[ms_b, 1] = cb[ms_b, 1]; fs_b[ms_b, 2] = ca[ms_b, 2]
-        methods["theta"].append(float(np.linalg.norm(fs_b - gm, axis=1).mean()))
+        cg = cj.copy(); cg[:, 2] = ci[:, 2]  # default per-axis
+        for j, (lo_j, hi_j) in enumerate(zip(edges[:-1], edges[1:])):
+            cs = consistency[j]
+            if cs is None: continue
+            mm = (em >= lo_j) & (em < hi_j)
+            if not mm.any(): continue
+            if cs > 0.9:
+                cg[mm] = (da_db[m][mm] + db_db[m][mm]) / 2.0
+        methods["cons_gate"].append(float(np.linalg.norm(cg - gm, axis=1).mean()))
 
-        wd = em[:, None] / (em[:, None] + best_tau_d)
-        methods["ew"].append(float(np.linalg.norm(wd * cb + (1.0 - wd) * ca - gm, axis=1).mean()))
-
-        methods["der_db"].append(float(np.linalg.norm(da_db[m] - gm, axis=1).mean()))
-        methods["gs_db"].append(float(np.linalg.norm(db_db[m] - gm, axis=1).mean()))
-
-    # Plot
-    colors = {"DER": "#1f77b4", "gs": "#d62728", "avg": "#7f7f7f", "gated": "#9467bd",
-              "pat": "#ff7f0e", "theta": "#2ca02c", "ew": "#17becf",
-              "der_db": "#bcbd22", "gs_db": "#e377c2"}
-    labels = {"DER": "DER", "gs": "gs", "avg": "avg", "gated": "gated",
-              "pat": "A:per-axis-trust", "theta": "B:theta-gate",
-              "ew": "D:epi-weighted", "der_db": "C:DER-debias", "gs_db": "C:gs-debias"}
-    line_order = ["DER", "gs", "avg", "gated", "pat", "theta", "ew", "der_db", "gs_db"]
+    colors = {"DER": "#1f77b4", "gs": "#d62728", "avg": "#7f7f7f",
+              "per_axis": "#ff7f0e", "full_db": "#17becf", "cons_gate": "#2ca02c"}
+    labels = {"DER": "DER", "gs": "gs", "avg": "avg",
+              "per_axis": "F: per-axis baseline", "full_db": "G: full-debias",
+              "cons_gate": "E: consistency-gated"}
+    order = ["DER", "gs", "avg", "per_axis", "cons_gate", "full_db"]
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    for key in line_order:
+    for key in order:
         vals = methods[key]
-        if all(np.isnan(v) for v in vals):
-            continue
-        ax.plot(dec_centers, vals, "o-", color=colors[key], markersize=5,
+        if all(np.isnan(v) for v in vals): continue
+        ax.plot(pct_centers, vals, "o-", color=colors[key], markersize=5,
                 linewidth=1.5, label=labels[key])
-    ax.set_xlabel("Epistemic Percentile", fontsize=11)
-    ax.set_ylabel("MAE", fontsize=11)
+    ax.set_xlabel("Epistemic Percentile")
+    ax.set_ylabel("MAE")
     ax.set_xlim(0, 100)
-    ax.set_title(f"{split}: fusion method comparison by epi decile", fontsize=12)
-    ax.legend(fontsize=7.5, ncol=2, loc="upper left")
+    ax.set_title(f"{split}: fusion methods by epi decile")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
     ax.grid(True, alpha=0.2)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "fusion_summary.png"), dpi=200)
