@@ -199,5 +199,17 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "threshold_sweep":
                     from visualization.plots import plot_threshold_sweep
                     plot_threshold_sweep(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_correction":
+                    from visualization.plots import plot_bias_correction
+                    plot_bias_correction(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_corr_scatter":
+                    from visualization.plots import plot_bias_corr_scatter
+                    plot_bias_corr_scatter(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_mag_vs_epi":
+                    from visualization.plots import plot_bias_mag_vs_epi
+                    plot_bias_mag_vs_epi(stats, split, out_dir=viz_dir)
+                elif viz_name == "signed_bias_vs_epi":
+                    from visualization.plots import plot_signed_bias_vs_epi
+                    plot_signed_bias_vs_epi(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

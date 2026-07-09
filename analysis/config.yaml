@@ -21,6 +21,7 @@ metrics:
   - per_axis
   - fusion
   - calibration
+  - bias_analysis
 
 # Conditions to apply to all metrics
 conditions:
@@ -37,3 +38,7 @@ visualization:
   - calibration_error
   - calibration_gain
   - threshold_sweep
+  - bias_correction
+  - bias_corr_scatter
+  - bias_mag_vs_epi
+  - signed_bias_vs_epi
