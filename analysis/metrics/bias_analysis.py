@@ -88,8 +88,7 @@ def _axis_analysis(epi, diff_a, diff_b, gt, axis_idx: int) -> dict:
         })
 
     # ── 4. GT-conditioned bias ──
-    gt_min, gt_max = gt_axis.min(), gt_axis.max()
-    gt_edges = np.linspace(gt_min, gt_max, 21)   # 20 equal-width bins
+    gt_edges = np.percentile(gt_axis, np.linspace(0, 100, 21))
     gt_conditioned = []
     for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
         m = (gt_axis >= lo) & (gt_axis < hi)
@@ -100,9 +99,12 @@ def _axis_analysis(epi, diff_a, diff_b, gt, axis_idx: int) -> dict:
             "gt_lo":          float(lo),
             "gt_hi":          float(hi),
             "n":              int(n),
+            "mean_GT":        float(gt_axis[m].mean()),
             "mean_bias_DER":  float(da[m].mean()),
+            "mean_pred_DER":  float(gt_axis[m].mean() + da[m].mean()),
             "var_bias_DER":   float(da[m].var()),
             "mean_bias_gs":   float(db[m].mean()),
+            "mean_pred_gs":   float(gt_axis[m].mean() + db[m].mean()),
             "var_bias_gs":    float(db[m].var()),
         })
 

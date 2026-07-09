@@ -409,36 +409,36 @@ def plot_disagreement_ratio(stats: StatsAccumulator, split: str, out_dir: str | 
 
 
 def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Mean bias vs GT coordinate range, per axis, 3 panels."""
+    """Mean prediction vs GT coordinate, per axis. Identity line = perfect."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
 
-    da, db, gt = stats.diff_A, stats.diff_B, stats.coord_gt
+    ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.2))
     for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
         gt_vals = gt[:, idx]
-        gt_min, gt_max = gt_vals.min(), gt_vals.max()
-        gt_edges = np.linspace(gt_min, gt_max, 21)
-        centers, ba_mean, bb_mean = [], [], []
+        gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
+        gtm, pred_a, pred_b = [], [], []
         for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
             m = (gt_vals >= lo) & (gt_vals < hi)
             if m.sum() < 3:
                 continue
-            centers.append((lo + hi) / 2)
-            ba_mean.append(float(da[m, idx].mean()))
-            bb_mean.append(float(db[m, idx].mean()))
-        ax.plot(centers, ba_mean, "bo-", markersize=4, label="DER")
-        ax.plot(centers, bb_mean, "rs-", markersize=4, label="gs")
-        ax.axhline(0, color="gray", linestyle=":", alpha=0.5)
+            gtm.append(float(gt_vals[m].mean()))
+            pred_a.append(float(ca[m, idx].mean()))
+            pred_b.append(float(cb[m, idx].mean()))
+        ax.plot(gtm, pred_a, "bo-", markersize=4, label="DER")
+        ax.plot(gtm, pred_b, "rs-", markersize=4, label="gs")
+        mx = max(abs(np.array(gtm).min()), abs(np.array(gtm).max())) * 1.1
+        ax.plot([-mx, mx], [-mx, mx], "gray", linestyle=":", alpha=0.5)
         ax.set_title(f"GT_{name}")
         ax.set_xlabel(f"GT_{name}")
-        ax.set_ylabel("E(bias)")
+        ax.set_ylabel(f"E(pred_{name})")
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.2)
-    fig.suptitle(f"{split}: bias vs GT coordinate", fontsize=12)
+    fig.suptitle(f"{split}: prediction vs GT coordinate", fontsize=12)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "gt_conditioned.png"), dpi=200)
     plt.close()
