@@ -1,10 +1,14 @@
-"""Adaptive Residual Fusion (ARF) — the only recommended method.
+"""Adaptive Residual Fusion — per-axis alpha + consistency gate.
 
-  coord_fusion = coord_DER + alpha(epi_std) * (coord_GS - coord_DER)
+  For pixel in ventile bin k:
+    if cos_sim[k] > 0.9:
+        fused_x = DER_x + alpha_x[k] * (gs_x - DER_x)
+        fused_y = DER_y + alpha_y[k] * (gs_y - DER_y)
+        fused_z = DER_z + alpha_z[k] * (gs_z - DER_z)
+    else:
+        fused = DER
 
-alpha is read from a 20-ventile lookup table built from mean_gain
-(E[error_DER - error_GS] | u_epi) — higher gain → trust GS more.
-Zero training, zero extra parameters.
+Per-axis alpha built from per-axis mean_gain in each ventile.
 """
 
 from __future__ import annotations
@@ -17,49 +21,77 @@ def compute(stats: StatsAccumulator) -> dict:
         return {"error": "no epi_var_A"}
 
     epi = stats.epi_var_A.flatten()
-    ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
-    ea, eb = stats.error_A, stats.error_B
-    gain = ea - eb                                 # >0 → GS better
+    ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt   # (N,3)
 
     # ── baselines ──
     result = {
-        "DER_mae": float(ea.mean()),
-        "gs_mae":  float(eb.mean()),
+        "DER_mae": float(stats.error_A.mean()),
+        "gs_mae":  float(stats.error_B.mean()),
         "avg_mae": float(np.linalg.norm((ca + cb) / 2.0 - gt, axis=1).mean()),
         "n":       int(len(epi)),
     }
 
-    # ── build 20-ventile alpha table from mean_gain ──
+    # ── per-axis absolute error ──
+    ae_a = np.abs(ca - gt)      # (N, 3)
+    ae_b = np.abs(cb - gt)
+    gain_xyz = ae_a - ae_b       # (N, 3)  >0 → GS better on that axis
+
+    # ── cos_sim per pixel ──
+    da = ca - gt
+    db = cb - gt
+    na = np.linalg.norm(da, axis=1)
+    nb = np.linalg.norm(db, axis=1)
+    denom = na * nb
+    valid = denom > 1e-12
+    cos_sim = np.ones_like(na)
+    cos_sim[valid] = np.clip((da[valid] * db[valid]).sum(axis=1) / denom[valid], -1.0, 1.0)
+
+    # ── 20-ventile bins ──
     edges = np.percentile(epi, np.linspace(0, 100, 21))
     edges = np.unique(np.round(edges, 8))
     n_bins = len(edges) - 1
 
-    mean_gain = np.zeros(n_bins)
-    bin_counts = np.zeros(n_bins, dtype=int)
+    mean_gain_x = np.zeros(n_bins)
+    mean_gain_y = np.zeros(n_bins)
+    mean_gain_z = np.zeros(n_bins)
+    mean_cos_sim = np.zeros(n_bins)
+    bin_counts  = np.zeros(n_bins, dtype=int)
+
     for i, (lo, hi) in enumerate(zip(edges[:n_bins], edges[1:])):
         m = (epi >= lo) & (epi < hi)
         n = m.sum()
         if n < 3:
             continue
-        mean_gain[i] = gain[m].mean()
+        mean_gain_x[i] = gain_xyz[m, 0].mean()
+        mean_gain_y[i] = gain_xyz[m, 1].mean()
+        mean_gain_z[i] = gain_xyz[m, 2].mean()
+        mean_cos_sim[i] = cos_sim[m].mean()
         bin_counts[i] = n
 
-    # alpha = normalized mean_gain  (clipped to [0, 1])
-    gmax = mean_gain.max()
-    alpha_table = np.clip(mean_gain / gmax, 0.0, 1.0) if gmax > 1e-12 else np.zeros(n_bins)
+    gmax_x = max(mean_gain_x.max(), 1e-12)
+    gmax_y = max(mean_gain_y.max(), 1e-12)
+    gmax_z = max(mean_gain_z.max(), 1e-12)
 
-    # ── apply ARF ──
-    delta = cb - ca                               # (N, 3)  residual
-    fused = ca.copy()
+    alpha_x = np.clip(mean_gain_x / gmax_x, 0.0, 1.0)
+    alpha_y = np.clip(mean_gain_y / gmax_y, 0.0, 1.0)
+    alpha_z = np.clip(mean_gain_z / gmax_z, 0.0, 1.0)
+
+    # ── apply ARF with consistency gate ──
+    fused = ca.copy()                                          # default = DER
     for i, (lo, hi) in enumerate(zip(edges[:n_bins], edges[1:])):
         if bin_counts[i] < 3:
             continue
         m = (epi >= lo) & (epi < hi)
-        fused[m] = ca[m] + alpha_table[i] * delta[m]
+        if mean_cos_sim[i] > 0.9:
+            fused[m, 0] = ca[m, 0] + alpha_x[i] * (cb[m, 0] - ca[m, 0])
+            fused[m, 1] = ca[m, 1] + alpha_y[i] * (cb[m, 1] - ca[m, 1])
+            fused[m, 2] = ca[m, 2] + alpha_z[i] * (cb[m, 2] - ca[m, 2])
 
     e_fused = np.linalg.norm(fused - gt, axis=1)
     result["ARF_mae"]  = float(e_fused.mean())
     result["ARF_rmse"] = float(np.sqrt((e_fused ** 2).mean()))
+    result["n_consistent_bins"] = int(sum(mean_cos_sim > 0.9))
+    result["n_total_bins"] = n_bins
 
     # ── alpha table ──
     alpha_rows = []
@@ -72,12 +104,14 @@ def compute(stats: StatsAccumulator) -> dict:
             "epi_hi":    float(edges[i + 1]),
             "epi_mean":  float(epi[(epi >= edges[i]) & (epi < edges[i + 1])].mean()),
             "n":         int(bin_counts[i]),
-            "mean_gain": float(mean_gain[i]),
-            "alpha":     float(alpha_table[i]),
+            "cos_sim":   float(mean_cos_sim[i]),
+            "gated":     bool(mean_cos_sim[i] > 0.9),
+            "gain_x":    float(mean_gain_x[i]), "gain_y": float(mean_gain_y[i]), "gain_z": float(mean_gain_z[i]),
+            "alpha_x":   float(alpha_x[i]),     "alpha_y": float(alpha_y[i]),     "alpha_z": float(alpha_z[i]),
         })
     result["alpha_table"] = alpha_rows
 
-    # ── per-decile MAE comparison ──
+    # ── per-decile MAE ──
     dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
     dec_centers = [(i * 10 + (i + 1) * 10) / 2 for i in range(10)]
     decile = []
