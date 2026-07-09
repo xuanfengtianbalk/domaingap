@@ -214,5 +214,8 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "bias_combined":
                     from visualization.plots import plot_bias_combined
                     plot_bias_combined(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_angle_vs_epi":
+                    from visualization.plots import plot_bias_angle_vs_epi
+                    plot_bias_angle_vs_epi(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

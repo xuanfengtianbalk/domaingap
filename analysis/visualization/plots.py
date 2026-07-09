@@ -446,3 +446,46 @@ def plot_bias_combined(stats: StatsAccumulator, split: str, out_dir: str | None 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "bias_combined.png"), dpi=200)
     plt.close()
+
+
+# ---- Figure 5: Bias Angle theta = arccos(e_DER · e_GS / |e_DER||e_GS|) ----
+
+def plot_bias_angle_vs_epi(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    if len(stats.diff_A) == 0 or stats.epi_var_A is None:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+
+    epi = stats.epi_var_A.flatten()
+    da, db = stats.diff_A, stats.diff_B
+    na = np.linalg.norm(da, axis=1)
+    nb = np.linalg.norm(db, axis=1)
+    valid = (na > 1e-12) & (nb > 1e-12)
+    cos_sim = np.full_like(na, np.nan)
+    cos_sim[valid] = np.clip((da[valid] * db[valid]).sum(axis=1) / (na[valid] * nb[valid]), -1.0, 1.0)
+    angle = np.rad2deg(np.arccos(np.clip(cos_sim, -1.0, 1.0)))
+
+    edges = np.percentile(epi, np.linspace(0, 100, 21))
+    edges = np.unique(edges)
+
+    centers, angles = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (epi >= lo) & (epi < hi)
+        n = m.sum()
+        if n < 10:
+            continue
+        vm = m & valid
+        if vm.sum() < 3:
+            continue
+        centers.append((lo + hi) / 2)
+        angles.append(float(np.mean(angle[vm])))
+
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.plot(centers, angles, "o-", color="darkred", markersize=4, linewidth=1.5)
+    ax.set_xlabel("Epistemic Percentile")
+    ax.set_ylabel("Mean θ  (degrees)")
+    ax.set_xlim(0, 100)
+    ax.set_title(f"{split}: error-vector angle grows with uncertainty")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "bias_angle_vs_epi.png"), dpi=200)
+    plt.close()

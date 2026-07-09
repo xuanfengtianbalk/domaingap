@@ -43,3 +43,4 @@ visualization:
   - bias_magnitude_vs_epi
   - bias_drift
   - bias_combined
+  - bias_angle_vs_epi

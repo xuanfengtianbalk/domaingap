@@ -1,9 +1,10 @@
 """Bias analysis: statistical validation before modelling.
 
-Three analyses:
+Four analyses:
   1. bias_correlation  — corr(bias_DER, bias_gs) per decile
   2. bias_magnitude    — E(|bias| | u_epi) per ventile
   3. signed_bias       — E(bias_x/y/z | u_epi) per ventile
+  4. bias_angle        — arccos(e_DER · e_GS / |e_DER||e_GS|) per ventile
 
 Output: bias_analysis.json (combined)
 """
@@ -100,9 +101,64 @@ def _ventile_stats(stats: StatsAccumulator, field: str) -> dict:
     return {"bins": bins, "n_total": int(len(epi))}
 
 
+def _angle_stats(stats: StatsAccumulator) -> dict:
+    """arccos(e_DER · e_GS / |e_DER||e_GS|) per ventile — angle between error vectors."""
+    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
+        return {"error": "no epi_var_A"}
+
+    epi = stats.epi_var_A.flatten()
+    diff_a = stats.diff_A
+    diff_b = stats.diff_B
+
+    norm_a = np.linalg.norm(diff_a, axis=1)
+    norm_b = np.linalg.norm(diff_b, axis=1)
+    dot = (diff_a * diff_b).sum(axis=1)
+    denom = norm_a * norm_b
+
+    valid = (norm_a > 1e-12) & (norm_b > 1e-12)
+    cos_sim = np.full_like(dot, np.nan)
+    cos_sim[valid] = np.clip(dot[valid] / denom[valid], -1.0, 1.0)
+    angle_deg = np.rad2deg(np.arccos(np.clip(cos_sim, -1.0, 1.0)))
+
+    overall_valid = valid
+    overall = {
+        "mean_angle_deg": float(np.nanmean(angle_deg[overall_valid])),
+        "mean_cos_sim":   float(np.nanmean(cos_sim[overall_valid])),
+        "n_valid":        int(overall_valid.sum()),
+        "n_total":        int(len(epi)),
+    }
+
+    edges = np.percentile(epi, np.linspace(0, 100, 21))
+    edges = np.unique(np.round(edges, 8))
+
+    bins = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (epi >= lo) & (epi < hi)
+        n = m.sum()
+        if n < 10:
+            continue
+        vm = m & valid
+        nv = vm.sum()
+        if nv < 3:
+            continue
+        bins.append({
+            "epi_lo":         float(lo),
+            "epi_hi":         float(hi),
+            "epi_mean":       float(epi[m].mean()),
+            "n":              int(n),
+            "n_valid":        int(nv),
+            "mean_angle_deg": float(np.mean(angle_deg[vm])),
+            "std_angle_deg":  float(np.std(angle_deg[vm])),
+            "mean_cos_sim":   float(np.mean(cos_sim[vm])),
+        })
+
+    return {"overall": overall, "bins": bins}
+
+
 def compute(stats: StatsAccumulator) -> dict:
     return {
         "bias_correlation":  _decile_corr(stats),
         "bias_magnitude":    _ventile_stats(stats, "magnitude"),
         "signed_bias":       _ventile_stats(stats, "signed"),
+        "bias_angle":        _angle_stats(stats),
     }
