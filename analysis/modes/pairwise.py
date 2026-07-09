@@ -202,14 +202,17 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "bias_correction":
                     from visualization.plots import plot_bias_correction
                     plot_bias_correction(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_corr_scatter":
-                    from visualization.plots import plot_bias_corr_scatter
-                    plot_bias_corr_scatter(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_mag_vs_epi":
-                    from visualization.plots import plot_bias_mag_vs_epi
-                    plot_bias_mag_vs_epi(stats, split, out_dir=viz_dir)
-                elif viz_name == "signed_bias_vs_epi":
-                    from visualization.plots import plot_signed_bias_vs_epi
-                    plot_signed_bias_vs_epi(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_pearson_vs_epi":
+                    from visualization.plots import plot_bias_pearson_vs_epi
+                    plot_bias_pearson_vs_epi(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_magnitude_vs_epi":
+                    from visualization.plots import plot_bias_magnitude_vs_epi
+                    plot_bias_magnitude_vs_epi(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_drift":
+                    from visualization.plots import plot_bias_drift
+                    plot_bias_drift(stats, split, out_dir=viz_dir)
+                elif viz_name == "bias_combined":
+                    from visualization.plots import plot_bias_combined
+                    plot_bias_combined(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

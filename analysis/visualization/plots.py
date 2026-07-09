@@ -270,111 +270,179 @@ def plot_bias_correction(stats: StatsAccumulator, split: str, out_dir: str | Non
     plt.close()
 
 
-def plot_bias_corr_scatter(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Scatter: bias_DER vs bias_gs, colored by epi_std decile."""
-    if len(stats.diff_A) == 0 or stats.epi_var_A is None:
-        return
-    save_dir = out_dir or os.path.join(OUT_DIR, split)
-    os.makedirs(save_dir, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Paper-ready bias analysis figures
+# ---------------------------------------------------------------------------
 
-    bias_a = np.linalg.norm(stats.diff_A, axis=1)
-    bias_b = np.linalg.norm(stats.diff_B, axis=1)
-    epi = stats.epi_var_A.flatten()
+def _decile_pearson(epi, diff_a, diff_b):
+    """Compute Pearson r per decile. Returns (pct_centers, r_values)."""
     edges = np.percentile(epi, np.linspace(0, 100, 11))
-
-    fig, ax = plt.subplots(figsize=(7, 7))
-    colors = plt.cm.viridis(np.linspace(0.1, 0.9, 10))
+    centers, r_vals = [], []
     for i in range(10):
-        m = (epi >= edges[i]) & (epi < edges[i + 1]) if i < 9 else (epi >= edges[i])
-        if m.sum() < 50:
+        lo, hi = edges[i], edges[i + 1]
+        m = (epi >= lo) & (epi < hi) if i < 10 else (epi >= lo)
+        if m.sum() < 3:
             continue
-        ax.scatter(bias_a[m], bias_b[m], s=0.5, alpha=0.3, color=colors[i],
-                   label=f"p{i*10}-p{(i+1)*10}" if i in [0, 4, 9] else "",
-                   rasterized=True)
-
-    mx = max(bias_a.max(), bias_b.max())
-    ax.plot([0, mx], [0, mx], "k--", alpha=0.3)
-    ax.set_xlabel("|bias| DER")
-    ax.set_ylabel("|bias| gs")
-    ax.set_title(f"{split}: bias DER vs bias gs (colored by epi decile)")
-    ax.legend(fontsize=7, loc="lower right", markerscale=5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "bias_corr_scatter.png"), dpi=150)
-    plt.close()
+        bias_a = np.linalg.norm(diff_a[m], axis=1)
+        bias_b = np.linalg.norm(diff_b[m], axis=1)
+        c = np.corrcoef(bias_a, bias_b)
+        centers.append((i + 0.5) * 10)
+        r_vals.append(float(c[0, 1]) if not np.isnan(c[0, 1]) else 0.0)
+    return centers, r_vals
 
 
-def plot_bias_mag_vs_epi(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Line plot: E(|bias|) vs epi_std for both models."""
+def _ventile_means(epi, diff_a, diff_b, signed=False):
+    """Compute per-ventile mean of |bias| or signed bias_x/y/z. Returns (centers, ...data)."""
+    edges = np.percentile(epi, np.linspace(0, 100, 21))
+    edges = np.unique(edges)
+    pct_edges_20 = np.linspace(0, 100, 21)
+    centers = []
+    ba, bb, bax, bay, baz, bbx, bby, bbz = [], [], [], [], [], [], [], []
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        m = (epi >= lo) & (epi < hi)
+        if m.sum() < 10:
+            continue
+        center_pct = (pct_edges_20[i] + pct_edges_20[i + 1]) / 2
+        actual_pct_lo, actual_pct_hi = pct_edges_20[i], pct_edges_20[i + 1]
+        centers.append((actual_pct_lo + actual_pct_hi) / 2)
+        ba.append(float(np.linalg.norm(diff_a[m], axis=1).mean()))
+        bb.append(float(np.linalg.norm(diff_b[m], axis=1).mean()))
+        if signed:
+            bax.append(float(diff_a[m, 0].mean()))
+            bay.append(float(diff_a[m, 1].mean()))
+            baz.append(float(diff_a[m, 2].mean()))
+            bbx.append(float(diff_b[m, 0].mean()))
+            bby.append(float(diff_b[m, 1].mean()))
+            bbz.append(float(diff_b[m, 2].mean()))
+    data = (ba, bb)
+    if signed:
+        data = (ba, bb, bax, bay, baz, bbx, bby, bbz)
+    return centers, data
+
+
+# ---- Figure 1: Pearson r vs Epistemic percentile (descending) ----
+
+def plot_bias_pearson_vs_epi(stats: StatsAccumulator, split: str, out_dir: str | None = None):
     if len(stats.diff_A) == 0 or stats.epi_var_A is None:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
-
     epi = stats.epi_var_A.flatten()
-    bias_a = np.linalg.norm(stats.diff_A, axis=1)
-    bias_b = np.linalg.norm(stats.diff_B, axis=1)
-    edges = np.percentile(epi, np.linspace(0, 100, 21))
-    edges = np.unique(edges)
+    centers, r_vals = _decile_pearson(epi, stats.diff_A, stats.diff_B)
 
-    centers, ma, mb = [], [], []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (epi >= lo) & (epi < hi)
-        if m.sum() < 10:
-            continue
-        centers.append((lo + hi) / 2)
-        ma.append(bias_a[m].mean())
-        mb.append(bias_b[m].mean())
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.plot(centers, r_vals, "ko-", markersize=6, linewidth=1.5)
+    ax.set_xlabel("Epistemic Percentile")
+    ax.set_ylabel("Pearson r  (|bias_DER|, |bias_gs|)")
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(0, 100)
+    ax.axhline(0.8, color="gray", linestyle="--", alpha=0.4)
+    ax.set_title(f"{split}: bias correlation decays with uncertainty")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "bias_pearson_vs_epi.png"), dpi=200)
+    plt.close()
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(centers, ma, "b-o", markersize=4, label="E(|bias_DER| | u_epi)")
-    ax.plot(centers, mb, "r-s", markersize=4, label="E(|bias_gs| | u_epi)")
-    ax.set_xlabel("Epistemic std")
-    ax.set_ylabel("Mean |bias|")
-    ax.set_xscale("log")
-    ax.set_title(f"{split}: bias magnitude vs epistemic uncertainty")
+
+# ---- Figure 2: |Bias| vs Epistemic percentile (ascending) ----
+
+def plot_bias_magnitude_vs_epi(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    if len(stats.diff_A) == 0 or stats.epi_var_A is None:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+    epi = stats.epi_var_A.flatten()
+    centers, (ba, bb) = _ventile_means(epi, stats.diff_A, stats.diff_B)
+
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.plot(centers, ba, "bo-", markersize=4, linewidth=1.2, label="E(|bias_DER|)")
+    ax.plot(centers, bb, "rs-", markersize=4, linewidth=1.2, label="E(|bias_gs|)")
+    ax.set_xlabel("Epistemic Percentile")
+    ax.set_ylabel("Mean  |bias|")
+    ax.set_xlim(0, 100)
     ax.legend(fontsize=8)
+    ax.set_title(f"{split}: bias magnitude grows with uncertainty")
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "bias_mag_vs_epi.png"), dpi=150)
+    plt.savefig(os.path.join(save_dir, "bias_magnitude_vs_epi.png"), dpi=200)
     plt.close()
 
 
-def plot_signed_bias_vs_epi(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Multi-line: E(bias_x/y/z) vs epi_std, DER solid, gs dashed."""
+# ---- Figure 3: Bias Drift (signed bias x/y/z, DER only) ----
+
+def plot_bias_drift(stats: StatsAccumulator, split: str, out_dir: str | None = None):
     if len(stats.diff_A) == 0 or stats.epi_var_A is None:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
-
     epi = stats.epi_var_A.flatten()
-    da, db = stats.diff_A, stats.diff_B
-    edges = np.percentile(epi, np.linspace(0, 100, 21))
-    edges = np.unique(edges)
+    centers, data = _ventile_means(epi, stats.diff_A, stats.diff_B, signed=True)
+    _, _, bax, bay, baz, bbx, bby, bbz = data
 
-    centers, ax_a, ay_a, az_a, ax_b, ay_b, az_b = [], [], [], [], [], [], []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (epi >= lo) & (epi < hi)
-        if m.sum() < 10:
-            continue
-        centers.append((lo + hi) / 2)
-        ax_a.append(da[m, 0].mean())
-        ay_a.append(da[m, 1].mean())
-        az_a.append(da[m, 2].mean())
-        ax_b.append(db[m, 0].mean())
-        ay_b.append(db[m, 1].mean())
-        az_b.append(db[m, 2].mean())
-
-    colors = {"x": "C0", "y": "C1", "z": "C2"}
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    for axis, ca, cb in [("x", ax_a, ax_b), ("y", ay_a, ay_b), ("z", az_a, az_b)]:
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
+    for axis, va, vb in [("x", bax, bbx), ("y", bay, bby), ("z", baz, bbz)]:
         c = colors[axis]
-        ax.plot(centers, ca, "-o", color=c, markersize=3, label=f"DER bias_{axis}")
-        ax.plot(centers, cb, "--s", color=c, markersize=3, alpha=0.6, label=f"gs  bias_{axis}")
+        ax.plot(centers, va, "-o", color=c, markersize=4, linewidth=1.2,
+                label=f"DER bias_{axis}")
+        ax.plot(centers, vb, "--s", color=c, markersize=3, linewidth=0.8, alpha=0.5)
     ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
-    ax.set_xlabel("Epistemic std")
+    ax.set_xlabel("Epistemic Percentile")
     ax.set_ylabel("E(signed bias)")
-    ax.set_xscale("log")
-    ax.set_title(f"{split}: signed bias vs epistemic uncertainty (— DER, -- gs)")
+    ax.set_xlim(0, 100)
+    ax.set_title(f"{split}: bias direction drifts with uncertainty  (— DER, -- gs)")
     ax.legend(fontsize=7, ncol=2)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "signed_bias_vs_epi.png"), dpi=150)
+    plt.savefig(os.path.join(save_dir, "bias_drift.png"), dpi=200)
+    plt.close()
+
+
+# ---- Figure 4: Combined dual-axis ----
+
+def plot_bias_combined(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    if len(stats.diff_A) == 0 or stats.epi_var_A is None:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+    epi = stats.epi_var_A.flatten()
+
+    # Pearson on decile centers
+    dec_centers, r_vals = _decile_pearson(epi, stats.diff_A, stats.diff_B)
+
+    # Mean |bias| on decile centers (recompute at decile for alignment)
+    dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
+    dec_bias_a, dec_bias_b = [], []
+    for i in range(10):
+        lo, hi = dec_edges[i], dec_edges[i + 1]
+        m = (epi >= lo) & (epi < hi) if i < 10 else (epi >= lo)
+        if m.sum() < 10:
+            continue
+        dec_bias_a.append(float(np.linalg.norm(stats.diff_A[m], axis=1).mean()))
+        dec_bias_b.append(float(np.linalg.norm(stats.diff_B[m], axis=1).mean()))
+
+    fig, ax1 = plt.subplots(figsize=(7, 4))
+
+    # Left y-axis: Pearson r
+    ax1.plot(dec_centers, r_vals, "ko-", markersize=7, linewidth=2, label="Pearson r")
+    ax1.set_xlabel("Epistemic Percentile", fontsize=12)
+    ax1.set_ylabel("Pearson  r", fontsize=12)
+    ax1.set_ylim(0, 1.05)
+    ax1.set_xlim(0, 100)
+    ax1.tick_params(axis="y")
+
+    # Right y-axis: |bias|
+    ax2 = ax1.twinx()
+    mean_bias = [(a + b) / 2 for a, b in zip(dec_bias_a, dec_bias_b)]
+    ax2.plot(dec_centers, dec_bias_a, "bs-", markersize=5, linewidth=1.2, alpha=0.7, label="|bias_DER|")
+    ax2.plot(dec_centers, dec_bias_b, "rD-", markersize=5, linewidth=1.2, alpha=0.7, label="|bias_gs|")
+    ax2.set_ylabel("Mean  |bias|", fontsize=12)
+    ax2.tick_params(axis="y")
+
+    # Shared legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc="center right")
+
+    ax1.set_title(f"{split}: correlation decays, bias grows with uncertainty", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "bias_combined.png"), dpi=200)
     plt.close()
