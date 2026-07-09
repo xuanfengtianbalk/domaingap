@@ -1,35 +1,35 @@
 {
   "overall": {
-    "pearson_r": 0.8396073579788208,
+    "pearson_r": 0.8244984745979309,
     "pearson_p": 0.0,
-    "spearman_r": 0.8743326714293628,
+    "spearman_r": 0.864560720798368,
     "spearman_p": 0.0,
-    "n": 12406748
+    "n": 2493369
   },
   "low_epi": {
-    "pearson_r": 0.9926140308380127,
+    "pearson_r": 0.9945498704910278,
     "pearson_p": 0.0,
-    "spearman_r": 0.99372103609131,
+    "spearman_r": 0.996062991926209,
     "spearman_p": 0.0,
-    "n": 4094226
+    "n": 822812
   },
   "mid_epi": {
-    "pearson_r": 0.9399877190589905,
+    "pearson_r": 0.921877384185791,
     "pearson_p": 0.0,
-    "spearman_r": 0.9528779988168541,
+    "spearman_r": 0.937301254262381,
     "spearman_p": 0.0,
-    "n": 4094228
+    "n": 822811
   },
   "high_epi": {
-    "pearson_r": 0.6279692053794861,
+    "pearson_r": 0.5939840078353882,
     "pearson_p": 0.0,
-    "spearman_r": 0.6195947021020107,
+    "spearman_r": 0.5845553951026319,
     "spearman_p": 0.0,
-    "n": 4218294
+    "n": 847746
   },
   "_condition_info": {
-    "low_epi": "epi_std < 0.000065",
-    "mid_epi": "epi_std \u2208 [0.000065, 0.000552)",
-    "high_epi": "epi_std >= 0.000552"
+    "low_epi": "epi_std < 0.000080",
+    "mid_epi": "epi_std \u2208 [0.000080, 0.001123)",
+    "high_epi": "epi_std >= 0.001123"
   }
 }

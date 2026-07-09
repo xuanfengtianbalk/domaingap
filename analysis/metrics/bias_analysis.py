@@ -95,6 +95,12 @@ def _ventile_stats(stats: StatsAccumulator, field: str) -> dict:
                 "bias_x_gs":  float(diff_b[m, 0].mean()),
                 "bias_y_gs":  float(diff_b[m, 1].mean()),
                 "bias_z_gs":  float(diff_b[m, 2].mean()),
+                "std_x_DER":  float(diff_a[m, 0].std()),
+                "std_y_DER":  float(diff_a[m, 1].std()),
+                "std_z_DER":  float(diff_a[m, 2].std()),
+                "std_x_gs":   float(diff_b[m, 0].std()),
+                "std_y_gs":   float(diff_b[m, 1].std()),
+                "std_z_gs":   float(diff_b[m, 2].std()),
             }
         bins.append(entry)
 

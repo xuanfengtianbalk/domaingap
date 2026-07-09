@@ -1,39 +1,39 @@
 {
   "overall": {
-    "cosine_similarity_mean": 0.8964436650276184,
-    "cosine_similarity_std": 0.26283884048461914,
-    "sign_agreement_x": 0.9136580351273356,
-    "sign_agreement_y": 0.9166636575515196,
-    "sign_agreement_z": 0.7562708616311059,
-    "n_pixels": 12406748
+    "cosine_similarity_mean": 0.8807914853096008,
+    "cosine_similarity_std": 0.29056841135025024,
+    "sign_agreement_x": 0.9027745191345525,
+    "sign_agreement_y": 0.9162767324050312,
+    "sign_agreement_z": 0.7506237544462934,
+    "n_pixels": 2493369
   },
   "low_epi": {
-    "cosine_similarity_mean": 0.9787450432777405,
-    "cosine_similarity_std": 0.12580342590808868,
-    "sign_agreement_x": 0.9588503419205486,
-    "sign_agreement_y": 0.9662089977446287,
-    "sign_agreement_z": 0.7544927905787321,
-    "n_pixels": 4094226
+    "cosine_similarity_mean": 0.9765648245811462,
+    "cosine_similarity_std": 0.13499048352241516,
+    "sign_agreement_x": 0.9428374890011327,
+    "sign_agreement_y": 0.9702933355371579,
+    "sign_agreement_z": 0.7815892330204226,
+    "n_pixels": 822812
   },
   "mid_epi": {
-    "cosine_similarity_mean": 0.9495266079902649,
-    "cosine_similarity_std": 0.19142624735832214,
-    "sign_agreement_x": 0.940122533478839,
-    "sign_agreement_y": 0.9508532499899859,
-    "sign_agreement_z": 0.78009138719192,
-    "n_pixels": 4094228
+    "cosine_similarity_mean": 0.9389483332633972,
+    "cosine_similarity_std": 0.2091130167245865,
+    "sign_agreement_x": 0.9312648955835544,
+    "sign_agreement_y": 0.9485689909347347,
+    "sign_agreement_z": 0.783100857912692,
+    "n_pixels": 822811
   },
   "high_epi": {
-    "cosine_similarity_mean": 0.7650412917137146,
-    "cosine_similarity_std": 0.35452210903167725,
-    "sign_agreement_x": 0.8441087795208205,
-    "sign_agreement_y": 0.8353915113550644,
-    "sign_agreement_z": 0.7348767060807047,
-    "n_pixels": 4218294
+    "cosine_similarity_mean": 0.7313887476921082,
+    "cosine_similarity_std": 0.39203086495399475,
+    "sign_agreement_x": 0.836237505101764,
+    "sign_agreement_y": 0.8325064347103968,
+    "sign_agreement_z": 0.6890471910218391,
+    "n_pixels": 847746
   },
   "_condition_info": {
-    "low_epi": "epi_std < 0.000065",
-    "mid_epi": "epi_std \u2208 [0.000065, 0.000552)",
-    "high_epi": "epi_std >= 0.000552"
+    "low_epi": "epi_std < 0.000080",
+    "mid_epi": "epi_std \u2208 [0.000080, 0.001123)",
+    "high_epi": "epi_std >= 0.001123"
   }
 }
