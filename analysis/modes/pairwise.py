@@ -199,9 +199,9 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "threshold_sweep":
                     from visualization.plots import plot_threshold_sweep
                     plot_threshold_sweep(stats, split, out_dir=viz_dir)
-                elif viz_name == "bias_correction":
-                    from visualization.plots import plot_bias_correction
-                    plot_bias_correction(stats, split, out_dir=viz_dir)
+                elif viz_name == "fusion_summary":
+                    from visualization.plots import plot_fusion_summary
+                    plot_fusion_summary(stats, split, out_dir=viz_dir)
                 elif viz_name == "bias_pearson_vs_epi":
                     from visualization.plots import plot_bias_pearson_vs_epi
                     plot_bias_pearson_vs_epi(stats, split, out_dir=viz_dir)

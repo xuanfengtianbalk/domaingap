@@ -38,7 +38,7 @@ visualization:
   - calibration_error
   - calibration_gain
   - threshold_sweep
-  - bias_correction
+  - fusion_summary
   - bias_pearson_vs_epi
   - bias_magnitude_vs_epi
   - bias_drift

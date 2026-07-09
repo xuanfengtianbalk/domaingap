@@ -215,8 +215,10 @@ def plot_threshold_sweep(stats: StatsAccumulator, split: str, out_dir: str | Non
     plt.close()
 
 
-def plot_bias_correction(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Bias correction sweep: DER / gs MAE vs alpha with epi_std-scaled correction."""
+# ── Fusion summary: per-epi-decile MAE comparison ───────────────────────────
+
+def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """Bar/line chart: MAE per epi decile for all fusion methods."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
@@ -226,47 +228,132 @@ def plot_bias_correction(stats: StatsAccumulator, split: str, out_dir: str | Non
     coord_a = stats.coord_A
     coord_b = stats.coord_B
     gt = stats.coord_gt
-    dir_vec = coord_a - coord_b
-    orig_mae_a = stats.error_A.mean()
-    orig_mae_b = stats.error_B.mean()
 
-    alphas = np.arange(0.0, 0.055, 0.005)
-    mae_a_list, mae_b_list = [orig_mae_a], [orig_mae_b]
+    taus = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
+    theta_thresholds = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0]
 
-    for a in alphas[1:]:
-        corr_a = coord_a - a * epi[:, None] * dir_vec
-        corr_b = coord_b - a * epi[:, None] * dir_vec
-        mae_a_list.append(float(np.linalg.norm(corr_a - gt, axis=1).mean()))
-        mae_b_list.append(float(np.linalg.norm(corr_b - gt, axis=1).mean()))
+    # Find best τ/θ from full data first
+    # Method A
+    best_mae_a = float("inf"); best_tau_a = 0.0005
+    for tau in taus:
+        mask = epi >= tau
+        f = (coord_a + coord_b) / 2.0
+        f[mask, 0] = coord_b[mask, 0]
+        f[mask, 1] = coord_b[mask, 1]
+        f[mask, 2] = coord_a[mask, 2]
+        m = float(np.linalg.norm(f - gt, axis=1).mean())
+        if m < best_mae_a: best_mae_a = m; best_tau_a = tau
 
-    best_idx_a = int(np.argmin(mae_a_list))
-    best_idx_b = int(np.argmin(mae_b_list))
+    # Method B
+    na = np.linalg.norm(coord_a - gt, axis=1)
+    nb = np.linalg.norm(coord_b - gt, axis=1)
+    denom = na * nb
+    valid_t = denom > 1e-12
+    cos_t = np.ones_like(denom)
+    cos_t[valid_t] = np.clip(((coord_a - gt) * (coord_b - gt)).sum(axis=1)[valid_t] / denom[valid_t], -1.0, 1.0)
+    theta_vals = np.rad2deg(np.arccos(np.clip(cos_t, -1.0, 1.0)))
 
-    fig, ax1 = plt.subplots(figsize=(9, 5))
-    ax1.plot(alphas, mae_a_list, "b-o", markersize=5, label="DER bias-corrected")
-    ax1.plot(alphas, mae_b_list, "r-s", markersize=5, label="gs bias-corrected")
-    ax1.axhline(orig_mae_a, color="b", linestyle="--", alpha=0.3, label=f"DER original ({orig_mae_a:.4f})")
-    ax1.axhline(orig_mae_b, color="r", linestyle="--", alpha=0.3, label=f"gs original ({orig_mae_b:.4f})")
-    ax1.axvline(alphas[best_idx_a], color="b", linestyle=":", alpha=0.6,
-                label=f"best DER alpha={alphas[best_idx_a]:.3f}")
-    ax1.axvline(alphas[best_idx_b], color="r", linestyle=":", alpha=0.6,
-                label=f"best gs  alpha={alphas[best_idx_b]:.3f}")
-    ax1.set_xlabel("Bias correction alpha")
-    ax1.set_ylabel("MAE")
-    ax1.set_title(f"{split}: bias correction sweep (DER/gs - alpha * std * dir)")
-    ax1.legend(fontsize=7, loc="center right")
-    ax1.set_xlim(0, 0.05)
+    best_mae_b = float("inf"); best_thr_b = 20.0
+    for thr in theta_thresholds:
+        mask = theta_vals >= thr
+        f = (coord_a + coord_b) / 2.0
+        f[mask, 0] = coord_b[mask, 0]
+        f[mask, 1] = coord_b[mask, 1]
+        f[mask, 2] = coord_a[mask, 2]
+        m = float(np.linalg.norm(f - gt, axis=1).mean())
+        if m < best_mae_b: best_mae_b = m; best_thr_b = thr
 
-    ax2 = ax1.twinx()
-    gain_a = [orig_mae_a - m for m in mae_a_list]
-    gain_b = [orig_mae_b - m for m in mae_b_list]
-    ax2.plot(alphas, gain_a, "b--", alpha=0.4, markersize=0)
-    ax2.plot(alphas, gain_b, "r--", alpha=0.4, markersize=0)
-    ax2.set_ylabel("Gain (MAE improvement)", color="gray")
-    ax2.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    # Method D
+    best_mae_d = float("inf"); best_tau_d = 0.0005
+    for tau in taus:
+        w = epi[:, None] / (epi[:, None] + tau)
+        f = w * coord_b + (1.0 - w) * coord_a
+        m = float(np.linalg.norm(f - gt, axis=1).mean())
+        if m < best_mae_d: best_mae_d = m; best_tau_d = tau
 
+    # Method C: table debias
+    edges_tbl = np.percentile(epi, np.linspace(0, 100, 21))
+    edges_tbl = np.unique(np.round(edges_tbl, 8))
+    t_der = np.zeros((len(edges_tbl) - 1, 3))
+    t_gs = np.zeros((len(edges_tbl) - 1, 3))
+    cnt = np.zeros(len(edges_tbl) - 1)
+    for i, (lo, hi) in enumerate(zip(edges_tbl[:-1], edges_tbl[1:])):
+        m = (epi >= lo) & (epi < hi); n = m.sum()
+        if n < 3: continue
+        t_der[i] = (coord_a[m] - gt[m]).mean(axis=0)
+        t_gs[i]  = (coord_b[m] - gt[m]).mean(axis=0)
+        cnt[i] = n
+    da_db = coord_a.copy(); db_db = coord_b.copy()
+    for i, (lo, hi) in enumerate(zip(edges_tbl[:-1], edges_tbl[1:])):
+        if cnt[i] < 3: continue
+        m = (epi >= lo) & (epi < hi)
+        da_db[m] -= t_der[i][None, :]
+        db_db[m] -= t_gs[i][None, :]
+
+    # Per-decile MAE table
+    dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
+    names = [f"{lo}-{hi}" for lo, hi in zip(range(0, 100, 10), range(10, 110, 10))]
+    dec_centers = [i * 10 + 5 for i in range(10)]
+
+    methods = {}  # {label: [mae_per_decile]}
+    for method_name in ["DER", "gs", "avg", "gated", "pat", "theta", "ew", "der_db", "gs_db"]:
+        methods[method_name] = []
+
+    lo_p33, hi_p66 = np.percentile(epi, [33, 66])
+    for i in range(10):
+        lo_d, hi_d = dec_edges[i], dec_edges[i + 1]
+        m = (epi >= lo_d) & (epi < hi_d) if i < 10 else (epi >= lo_d)
+        if m.sum() < 10:
+            for k in methods: methods[k].append(float("nan"))
+            continue
+        ca, cb, gm, em = coord_a[m], coord_b[m], gt[m], epi[m]
+
+        methods["DER"].append(float(np.linalg.norm(ca - gm, axis=1).mean()))
+        methods["gs"].append(float(np.linalg.norm(cb - gm, axis=1).mean()))
+        methods["avg"].append(float(np.linalg.norm((ca + cb) / 2.0 - gm, axis=1).mean()))
+
+        fg = np.where(em[:, None] < lo_p33, ca, np.where(em[:, None] < hi_p66, (ca + cb) / 2.0, cb))
+        methods["gated"].append(float(np.linalg.norm(fg - gm, axis=1).mean()))
+
+        fs_a = (ca + cb) / 2.0; ms_a = em >= best_tau_a
+        fs_a[ms_a, 0] = cb[ms_a, 0]; fs_a[ms_a, 1] = cb[ms_a, 1]; fs_a[ms_a, 2] = ca[ms_a, 2]
+        methods["pat"].append(float(np.linalg.norm(fs_a - gm, axis=1).mean()))
+
+        tm = theta_vals[m]; ms_b = tm >= best_thr_b
+        fs_b = (ca + cb) / 2.0
+        fs_b[ms_b, 0] = cb[ms_b, 0]; fs_b[ms_b, 1] = cb[ms_b, 1]; fs_b[ms_b, 2] = ca[ms_b, 2]
+        methods["theta"].append(float(np.linalg.norm(fs_b - gm, axis=1).mean()))
+
+        wd = em[:, None] / (em[:, None] + best_tau_d)
+        methods["ew"].append(float(np.linalg.norm(wd * cb + (1.0 - wd) * ca - gm, axis=1).mean()))
+
+        methods["der_db"].append(float(np.linalg.norm(da_db[m] - gm, axis=1).mean()))
+        methods["gs_db"].append(float(np.linalg.norm(db_db[m] - gm, axis=1).mean()))
+
+    # Plot
+    colors = {"DER": "#1f77b4", "gs": "#d62728", "avg": "#7f7f7f", "gated": "#9467bd",
+              "pat": "#ff7f0e", "theta": "#2ca02c", "ew": "#17becf",
+              "der_db": "#bcbd22", "gs_db": "#e377c2"}
+    labels = {"DER": "DER", "gs": "gs", "avg": "avg", "gated": "gated",
+              "pat": "A:per-axis-trust", "theta": "B:theta-gate",
+              "ew": "D:epi-weighted", "der_db": "C:DER-debias", "gs_db": "C:gs-debias"}
+    line_order = ["DER", "gs", "avg", "gated", "pat", "theta", "ew", "der_db", "gs_db"]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for key in line_order:
+        vals = methods[key]
+        if all(np.isnan(v) for v in vals):
+            continue
+        ax.plot(dec_centers, vals, "o-", color=colors[key], markersize=5,
+                linewidth=1.5, label=labels[key])
+    ax.set_xlabel("Epistemic Percentile", fontsize=11)
+    ax.set_ylabel("MAE", fontsize=11)
+    ax.set_xlim(0, 100)
+    ax.set_title(f"{split}: fusion method comparison by epi decile", fontsize=12)
+    ax.legend(fontsize=7.5, ncol=2, loc="upper left")
+    ax.grid(True, alpha=0.2)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "bias_correction.png"), dpi=150)
+    plt.savefig(os.path.join(save_dir, "fusion_summary.png"), dpi=200)
     plt.close()
 
 
