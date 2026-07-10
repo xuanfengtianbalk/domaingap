@@ -451,7 +451,7 @@ def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None
 
 
 def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Scatter: |bias| (central tendency strength) vs mean_epi_std per GT bin."""
+    """Per GT bin: epi_std (x) vs bias (y) curves. 5 representative GT bins per axis."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
@@ -460,31 +460,53 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
     epi = stats.epi_var_A.flatten()
     ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
     for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
         gt_vals = gt[:, idx]
-        da = ca[:, idx] - gt_vals
-        db = cb[:, idx] - gt_vals
         gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
+        # Pick 5 representative GT bins: extreme low, low-mid, center, mid-high, extreme high
+        pick_idx = [0, 5, 9, 14, 19]
 
-        gtm_list, epi_list, ct_a, ct_b = [], [], [], []
-        for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
-            m = (gt_vals >= lo) & (gt_vals < hi)
-            if m.sum() < 3:
+        colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(pick_idx)))
+
+        for pi, gi in enumerate(pick_idx):
+            lo, hi = gt_edges[gi], gt_edges[gi + 1]
+            m_gt = (gt_vals >= lo) & (gt_vals < hi)
+            if m_gt.sum() < 30:
                 continue
-            gtm_list.append(abs(float(gt_vals[m].mean())))
-            epi_list.append(float(epi[m].mean()))
-            ct_a.append(float(abs(da[m].mean())))
-            ct_b.append(float(abs(db[m].mean())))
+            es, cs, cbs = epi[m_gt], ca[m_gt, idx], cb[m_gt, idx]
+            gs_sub = gt_vals[m_gt]
 
-        sc_a = ax.scatter(epi_list, ct_a, c=gtm_list, cmap="viridis", s=30, alpha=0.8, label="DER")
-        sc_b = ax.scatter(epi_list, ct_b, c=gtm_list, cmap="viridis", s=30, alpha=0.8, marker="s", label="gs")
+            epi_edges = np.percentile(es, np.linspace(0, 100, 11))
+            epi_ctr, ba_mean, ba_med, bb_mean, bb_med = [], [], [], [], []
+            for elo, ehi in zip(epi_edges[:-1], epi_edges[1:]):
+                me = (es >= elo) & (es < ehi)
+                if me.sum() < 5:
+                    continue
+                epi_ctr.append(float(es[me].mean()))
+                delta_a = cs[me] - gs_sub[me]
+                delta_b = cbs[me] - gs_sub[me]
+                ba_mean.append(float(delta_a.mean()))
+                ba_med.append(float(np.percentile(delta_a, 50)))
+                bb_mean.append(float(delta_b.mean()))
+                bb_med.append(float(np.percentile(delta_b, 50)))
+
+            gt_mid = float(gs_sub.mean())
+            ax.plot(epi_ctr, ba_mean, "-", color=colors[pi], linewidth=1.2,
+                    label=f"GT≈{gt_mid:+.2f}")
+            ax.plot(epi_ctr, ba_med, "--", color=colors[pi], linewidth=0.7, alpha=0.5)
+            ax.plot(epi_ctr, bb_mean, "-.", color=colors[pi], linewidth=0.8, alpha=0.6)
+            ax.plot(epi_ctr, bb_med, ":", color=colors[pi], linewidth=0.6, alpha=0.4)
+
+        ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
         ax.set_title(f"GT_{name}")
         ax.set_xlabel("mean epi_std")
-        ax.set_ylabel("|mean bias| (CT strength)")
-        ax.grid(True, alpha=0.2)
-    fig.colorbar(sc_a, ax=axes, label="|GT| (distance from origin)", shrink=0.6, pad=0.02)
-    fig.suptitle(f"{split}: central tendency vs uncertainty", fontsize=12)
+        ax.set_ylabel("bias (— DER mean, -- DER med, -. gs mean, ·· gs med)")
+        ax.set_xscale("log")
+        ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.15)
+
+    fig.suptitle(f"{split}: epi_std vs bias per GT bin  (colored by GT position)", fontsize=12)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "ct_vs_uncertainty.png"), dpi=200)
     plt.close()

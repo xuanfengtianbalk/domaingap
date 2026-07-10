@@ -114,9 +114,41 @@ def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> 
             "p50_pred_gs":    float(np.percentile(cb[m], 50)),
             "p75_pred_gs":    float(np.percentile(cb[m], 75)),
             "var_bias_gs":    float(db[m].var()),
-            "mean_epi_std":   float(epi[m].mean()),
-            "ct_strength_DER": float(abs(da[m].mean())),
-            "ct_strength_gs":  float(abs(db[m].mean())),
+        })
+
+    # ── 5. CT profile: epi_std vs bias, per GT bin ──
+    ct_profile = []
+    for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
+        m_gt = (gt_axis >= lo) & (gt_axis < hi)
+        n = m_gt.sum()
+        if n < 30:
+            continue
+        epi_sub = epi[m_gt]
+        ca_sub, cb_sub = ca[m_gt], cb[m_gt]
+        gt_sub = gt_axis[m_gt]
+
+        epi_edges = np.percentile(epi_sub, np.linspace(0, 100, 11))
+        epi_bins = []
+        for elo, ehi in zip(epi_edges[:-1], epi_edges[1:]):
+            me = (epi_sub >= elo) & (epi_sub < ehi)
+            if me.sum() < 5:
+                continue
+            epi_bins.append({
+                "epi_lo":          float(elo),
+                "epi_hi":          float(ehi),
+                "mean_epi_std":    float(epi_sub[me].mean()),
+                "n":               int(me.sum()),
+                "mean_GT":         float(gt_sub[me].mean()),
+                "mean_bias_DER":   float((ca_sub[me] - gt_sub[me]).mean()),
+                "med_bias_DER":    float(np.percentile(ca_sub[me] - gt_sub[me], 50)),
+                "mean_bias_gs":    float((cb_sub[me] - gt_sub[me]).mean()),
+                "med_bias_gs":     float(np.percentile(cb_sub[me] - gt_sub[me], 50)),
+            })
+        ct_profile.append({
+            "gt_lo":    float(lo),
+            "gt_hi":    float(hi),
+            "mean_GT":  float(gt_sub.mean()),
+            "epi_bins": epi_bins,
         })
 
     return {
@@ -124,6 +156,7 @@ def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> 
         "bias_magnitude":     bias_mag,
         "disagreement_ratio": disagree,
         "gt_conditioned":     gt_conditioned,
+        "ct_profile":         ct_profile,
     }
 
 
