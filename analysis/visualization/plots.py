@@ -409,7 +409,7 @@ def plot_disagreement_ratio(stats: StatsAccumulator, split: str, out_dir: str | 
 
 
 def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Mean prediction vs GT coordinate, per axis. Identity line = perfect."""
+    """Mean prediction + p25-p75 band vs GT coordinate, per axis. Identity line = perfect."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
@@ -417,25 +417,31 @@ def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None
 
     ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.2))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
     for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
         gt_vals = gt[:, idx]
         gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
-        gtm, pred_a, pred_b = [], [], []
+        gtm, p50_a, p25_a, p75_a, p50_b, p25_b, p75_b = [], [], [], [], [], [], []
         for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
             m = (gt_vals >= lo) & (gt_vals < hi)
             if m.sum() < 3:
                 continue
             gtm.append(float(gt_vals[m].mean()))
-            pred_a.append(float(ca[m, idx].mean()))
-            pred_b.append(float(cb[m, idx].mean()))
-        ax.plot(gtm, pred_a, "bo-", markersize=4, label="DER")
-        ax.plot(gtm, pred_b, "rs-", markersize=4, label="gs")
+            p50_a.append(float(np.percentile(ca[m, idx], 50)))
+            p25_a.append(float(np.percentile(ca[m, idx], 25)))
+            p75_a.append(float(np.percentile(ca[m, idx], 75)))
+            p50_b.append(float(np.percentile(cb[m, idx], 50)))
+            p25_b.append(float(np.percentile(cb[m, idx], 25)))
+            p75_b.append(float(np.percentile(cb[m, idx], 75)))
+        ax.fill_between(gtm, p25_a, p75_a, color="#1f77b4", alpha=0.12)
+        ax.fill_between(gtm, p25_b, p75_b, color="#d62728", alpha=0.12)
+        ax.plot(gtm, p50_a, "o-", color="#1f77b4", markersize=3, linewidth=1.2, label="DER")
+        ax.plot(gtm, p50_b, "s-", color="#d62728", markersize=3, linewidth=1.2, label="gs")
         mx = max(abs(np.array(gtm).min()), abs(np.array(gtm).max())) * 1.1
         ax.plot([-mx, mx], [-mx, mx], "gray", linestyle=":", alpha=0.5)
         ax.set_title(f"GT_{name}")
         ax.set_xlabel(f"GT_{name}")
-        ax.set_ylabel(f"E(pred_{name})")
+        ax.set_ylabel(f"pred_{name} (p50, p25-p75)")
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.2)
     fig.suptitle(f"{split}: prediction vs GT coordinate", fontsize=12)

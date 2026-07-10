@@ -13,9 +13,11 @@ from metrics.accumulator import StatsAccumulator
 NO_CONDITIONS = True
 
 
-def _axis_analysis(epi, diff_a, diff_b, gt, axis_idx: int) -> dict:
+def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> dict:
     da = diff_a[:, axis_idx]    # bias_DER per axis  (N,)
     db = diff_b[:, axis_idx]    # bias_gs  per axis
+    ca = coord_a[:, axis_idx]   # pred_DER per axis
+    cb = coord_b[:, axis_idx]   # pred_gs  per axis
     gt_axis = gt[:, axis_idx]   # GT per axis
 
     # ── 100 percentile bins ──
@@ -101,10 +103,16 @@ def _axis_analysis(epi, diff_a, diff_b, gt, axis_idx: int) -> dict:
             "n":              int(n),
             "mean_GT":        float(gt_axis[m].mean()),
             "mean_bias_DER":  float(da[m].mean()),
-            "mean_pred_DER":  float(gt_axis[m].mean() + da[m].mean()),
+            "mean_pred_DER":  float(ca[m].mean()),
+            "p25_pred_DER":   float(np.percentile(ca[m], 25)),
+            "p50_pred_DER":   float(np.percentile(ca[m], 50)),
+            "p75_pred_DER":   float(np.percentile(ca[m], 75)),
             "var_bias_DER":   float(da[m].var()),
             "mean_bias_gs":   float(db[m].mean()),
-            "mean_pred_gs":   float(gt_axis[m].mean() + db[m].mean()),
+            "mean_pred_gs":   float(cb[m].mean()),
+            "p25_pred_gs":    float(np.percentile(cb[m], 25)),
+            "p50_pred_gs":    float(np.percentile(cb[m], 50)),
+            "p75_pred_gs":    float(np.percentile(cb[m], 75)),
             "var_bias_gs":    float(db[m].var()),
         })
 
@@ -123,10 +131,12 @@ def compute(stats: StatsAccumulator) -> dict:
     epi = stats.epi_var_A.flatten()
     da = stats.diff_A    # (N, 3)  DER - GT
     db = stats.diff_B    # (N, 3)  gs  - GT
+    ca = stats.coord_A   # (N, 3)  DER predictions
+    cb = stats.coord_B   # (N, 3)  gs  predictions
     gt = stats.coord_gt
 
     return {
-        "x": _axis_analysis(epi, da, db, gt, 0),
-        "y": _axis_analysis(epi, da, db, gt, 1),
-        "z": _axis_analysis(epi, da, db, gt, 2),
+        "x": _axis_analysis(epi, da, db, ca, cb, gt, 0),
+        "y": _axis_analysis(epi, da, db, ca, cb, gt, 1),
+        "z": _axis_analysis(epi, da, db, ca, cb, gt, 2),
     }
