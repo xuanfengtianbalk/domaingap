@@ -451,20 +451,22 @@ def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None
 
 
 def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Per GT bin: epi_std (x) vs bias (y) curves. 5 representative GT bins per axis."""
+    """Per GT bin: total_std (x) vs bias (y) curves. 5 representative GT bins per axis."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
 
-    epi = stats.epi_var_A.flatten()
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
     ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
     for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
         gt_vals = gt[:, idx]
         gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
-        # Pick 5 representative GT bins: extreme low, low-mid, center, mid-high, extreme high
         pick_idx = [0, 5, 9, 14, 19]
 
         colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(pick_idx)))
@@ -474,16 +476,16 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
             m_gt = (gt_vals >= lo) & (gt_vals < hi)
             if m_gt.sum() < 30:
                 continue
-            es, cs, cbs = epi[m_gt], ca[m_gt, idx], cb[m_gt, idx]
+            ts, cs, cbs = total_std[m_gt], ca[m_gt, idx], cb[m_gt, idx]
             gs_sub = gt_vals[m_gt]
 
-            epi_edges = np.percentile(es, np.linspace(0, 100, 11))
-            epi_ctr, ba_mean, ba_med, bb_mean, bb_med = [], [], [], [], []
-            for elo, ehi in zip(epi_edges[:-1], epi_edges[1:]):
-                me = (es >= elo) & (es < ehi)
+            ts_edges = np.percentile(ts, np.linspace(0, 100, 11))
+            ts_ctr, ba_mean, ba_med, bb_mean, bb_med = [], [], [], [], []
+            for elo, ehi in zip(ts_edges[:-1], ts_edges[1:]):
+                me = (ts >= elo) & (ts < ehi)
                 if me.sum() < 5:
                     continue
-                epi_ctr.append(float(es[me].mean()))
+                ts_ctr.append(float(ts[me].mean()))
                 delta_a = cs[me] - gs_sub[me]
                 delta_b = cbs[me] - gs_sub[me]
                 ba_mean.append(float(delta_a.mean()))
@@ -492,21 +494,21 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
                 bb_med.append(float(np.percentile(delta_b, 50)))
 
             gt_mid = float(gs_sub.mean())
-            ax.plot(epi_ctr, ba_mean, "-", color=colors[pi], linewidth=1.2,
+            ax.plot(ts_ctr, ba_mean, "-", color=colors[pi], linewidth=1.2,
                     label=f"GT≈{gt_mid:+.2f}")
-            ax.plot(epi_ctr, ba_med, "--", color=colors[pi], linewidth=0.7, alpha=0.5)
-            ax.plot(epi_ctr, bb_mean, "-.", color=colors[pi], linewidth=0.8, alpha=0.6)
-            ax.plot(epi_ctr, bb_med, ":", color=colors[pi], linewidth=0.6, alpha=0.4)
+            ax.plot(ts_ctr, ba_med, "--", color=colors[pi], linewidth=0.7, alpha=0.5)
+            ax.plot(ts_ctr, bb_mean, "-.", color=colors[pi], linewidth=0.8, alpha=0.6)
+            ax.plot(ts_ctr, bb_med, ":", color=colors[pi], linewidth=0.6, alpha=0.4)
 
         ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
         ax.set_title(f"GT_{name}")
-        ax.set_xlabel("mean epi_std")
+        ax.set_xlabel("mean total_std")
         ax.set_ylabel("bias (— DER mean, -- DER med, -. gs mean, ·· gs med)")
         ax.set_xscale("log")
         ax.legend(fontsize=6, ncol=2)
         ax.grid(True, alpha=0.15)
 
-    fig.suptitle(f"{split}: epi_std vs bias per GT bin  (colored by GT position)", fontsize=12)
+    fig.suptitle(f"{split}: total_std vs bias per GT bin  (colored by GT position)", fontsize=12)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "ct_vs_uncertainty.png"), dpi=200)
     plt.close()

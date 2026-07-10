@@ -13,7 +13,7 @@ from metrics.accumulator import StatsAccumulator
 NO_CONDITIONS = True
 
 
-def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> dict:
+def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> dict:
     da = diff_a[:, axis_idx]    # bias_DER per axis  (N,)
     db = diff_b[:, axis_idx]    # bias_gs  per axis
     ca = coord_a[:, axis_idx]   # pred_DER per axis
@@ -116,27 +116,27 @@ def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> 
             "var_bias_gs":    float(db[m].var()),
         })
 
-    # ── 5. CT profile: epi_std vs bias, per GT bin ──
+    # ── 5. CT profile: total_std vs bias, per GT bin ──
     ct_profile = []
     for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
         m_gt = (gt_axis >= lo) & (gt_axis < hi)
         n = m_gt.sum()
         if n < 30:
             continue
-        epi_sub = epi[m_gt]
+        ts_sub = total_std[m_gt]
         ca_sub, cb_sub = ca[m_gt], cb[m_gt]
         gt_sub = gt_axis[m_gt]
 
-        epi_edges = np.percentile(epi_sub, np.linspace(0, 100, 11))
+        ts_edges = np.percentile(ts_sub, np.linspace(0, 100, 11))
         epi_bins = []
-        for elo, ehi in zip(epi_edges[:-1], epi_edges[1:]):
-            me = (epi_sub >= elo) & (epi_sub < ehi)
+        for elo, ehi in zip(ts_edges[:-1], ts_edges[1:]):
+            me = (ts_sub >= elo) & (ts_sub < ehi)
             if me.sum() < 5:
                 continue
             epi_bins.append({
-                "epi_lo":          float(elo),
-                "epi_hi":          float(ehi),
-                "mean_epi_std":    float(epi_sub[me].mean()),
+                "total_std_lo":     float(elo),
+                "total_std_hi":     float(ehi),
+                "mean_total_std":   float(ts_sub[me].mean()),
                 "n":               int(me.sum()),
                 "mean_GT":         float(gt_sub[me].mean()),
                 "mean_bias_DER":   float((ca_sub[me] - gt_sub[me]).mean()),
@@ -165,6 +165,12 @@ def compute(stats: StatsAccumulator) -> dict:
         return {"error": "no epi_var_A"}
 
     epi = stats.epi_var_A.flatten()
+    # total_std = sqrt(epi_var + alea_var)
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
+        total_std = np.sqrt(total_var)
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
     da = stats.diff_A    # (N, 3)  DER - GT
     db = stats.diff_B    # (N, 3)  gs  - GT
     ca = stats.coord_A   # (N, 3)  DER predictions
@@ -172,7 +178,7 @@ def compute(stats: StatsAccumulator) -> dict:
     gt = stats.coord_gt
 
     return {
-        "x": _axis_analysis(epi, da, db, ca, cb, gt, 0),
-        "y": _axis_analysis(epi, da, db, ca, cb, gt, 1),
-        "z": _axis_analysis(epi, da, db, ca, cb, gt, 2),
+        "x": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 0),
+        "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 1),
+        "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 2),
     }
