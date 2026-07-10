@@ -40,3 +40,11 @@ visualization:
   - disagreement_ratio
   - gt_conditioned
   - ct_vs_uncertainty
+
+# GT coordinate ranges from speed_satellite_normed.glb
+# x/y/z mapping: data_x=GLB_X, data_y=GLB_Z, data_z=GLB_Y
+gt_ranges:
+  x: [-0.57, 0.57]
+  y: [-0.52, 0.60]
+  z: [0.00, 0.33]
+  bin_step: 0.05

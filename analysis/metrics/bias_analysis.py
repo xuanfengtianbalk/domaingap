@@ -13,7 +13,7 @@ from metrics.accumulator import StatsAccumulator
 NO_CONDITIONS = True
 
 
-def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> dict:
+def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, gt_range, step, axis_idx: int) -> dict:
     da = diff_a[:, axis_idx]    # bias_DER per axis  (N,)
     db = diff_b[:, axis_idx]    # bias_gs  per axis
     ca = coord_a[:, axis_idx]   # pred_DER per axis
@@ -116,9 +116,10 @@ def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, axis_id
             "var_bias_gs":    float(db[m].var()),
         })
 
-    # ── 5. CT profile: total_std vs bias, per GT bin ──
+    # ── 5. CT profile: total_std vs bias, fixed-step GT bins ──
+    ct_edges = np.arange(gt_range[0], gt_range[1] + step * 0.5, step)
     ct_profile = []
-    for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
+    for lo, hi in zip(ct_edges[:-1], ct_edges[1:]):
         m_gt = (gt_axis >= lo) & (gt_axis < hi)
         n = m_gt.sum()
         if n < 30:
@@ -164,21 +165,27 @@ def compute(stats: StatsAccumulator) -> dict:
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return {"error": "no epi_var_A"}
 
+    import yaml, os
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    gr = cfg["gt_ranges"]
+    step = gr["bin_step"]
+
     epi = stats.epi_var_A.flatten()
-    # total_std = sqrt(epi_var + alea_var)
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
         total_std = np.sqrt(total_var)
     else:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
-    da = stats.diff_A    # (N, 3)  DER - GT
-    db = stats.diff_B    # (N, 3)  gs  - GT
-    ca = stats.coord_A   # (N, 3)  DER predictions
-    cb = stats.coord_B   # (N, 3)  gs  predictions
+    da = stats.diff_A
+    db = stats.diff_B
+    ca = stats.coord_A
+    cb = stats.coord_B
     gt = stats.coord_gt
 
     return {
-        "x": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 0),
-        "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 1),
-        "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, 2),
+        "x": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["x"], step, 0),
+        "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["y"], step, 1),
+        "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["z"], step, 2),
     }

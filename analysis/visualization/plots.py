@@ -451,11 +451,18 @@ def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None
 
 
 def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """Per GT bin: total_std (x) vs bias (y) curves. 5 representative GT bins per axis."""
+    """Per GT bin: total_std (x) vs bias (y) curves. Fixed-step GT bins from config."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
+
+    import yaml
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    gr = cfg["gt_ranges"]
+    step = gr["bin_step"]
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
@@ -464,14 +471,20 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
     ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
-    for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
+    keys = ["x", "y", "z"]
+    for ax, key, idx in zip(axes, keys, [0, 1, 2]):
         gt_vals = gt[:, idx]
-        gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
-        pick_idx = [0, 5, 9, 14, 19]
+        g_range = gr[key]
+        gt_edges = np.arange(g_range[0], g_range[1] + step * 0.5, step)
+        n_gt_bins = len(gt_edges) - 1
+        # Pick 5 representative GT bins
+        pick_idx = [0, n_gt_bins // 4, n_gt_bins // 2, 3 * n_gt_bins // 4, n_gt_bins - 1]
 
         colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(pick_idx)))
 
         for pi, gi in enumerate(pick_idx):
+            if gi >= n_gt_bins:
+                continue
             lo, hi = gt_edges[gi], gt_edges[gi + 1]
             m_gt = (gt_vals >= lo) & (gt_vals < hi)
             if m_gt.sum() < 30:
@@ -501,7 +514,7 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
             ax.plot(ts_ctr, bb_med, ":", color=colors[pi], linewidth=0.6, alpha=0.4)
 
         ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
-        ax.set_title(f"GT_{name}")
+        ax.set_title(f"GT_{key}")
         ax.set_xlabel("mean total_std")
         ax.set_ylabel("bias (— DER mean, -- DER med, -. gs mean, ·· gs med)")
         ax.set_xscale("log")
