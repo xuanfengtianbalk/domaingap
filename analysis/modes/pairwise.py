@@ -214,5 +214,8 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "gt_conditioned":
                     from visualization.plots import plot_gt_conditioned
                     plot_gt_conditioned(stats, split, out_dir=viz_dir)
+                elif viz_name == "ct_vs_uncertainty":
+                    from visualization.plots import plot_ct_vs_uncertainty
+                    plot_ct_vs_uncertainty(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

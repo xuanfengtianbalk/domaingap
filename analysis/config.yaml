@@ -39,3 +39,4 @@ visualization:
   - bias_magnitude
   - disagreement_ratio
   - gt_conditioned
+  - ct_vs_uncertainty

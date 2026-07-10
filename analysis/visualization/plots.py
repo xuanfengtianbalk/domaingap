@@ -421,30 +421,70 @@ def plot_gt_conditioned(stats: StatsAccumulator, split: str, out_dir: str | None
     for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
         gt_vals = gt[:, idx]
         gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
-        gtm, p50_a, p25_a, p75_a, p50_b, p25_b, p75_b = [], [], [], [], [], [], []
+        gtm, ma, p25_a, p75_a, p50_a, mb, p25_b, p75_b, p50_b = [], [], [], [], [], [], [], [], []
         for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
             m = (gt_vals >= lo) & (gt_vals < hi)
             if m.sum() < 3:
                 continue
             gtm.append(float(gt_vals[m].mean()))
+            ma.append(float(ca[m, idx].mean()))
             p50_a.append(float(np.percentile(ca[m, idx], 50)))
             p25_a.append(float(np.percentile(ca[m, idx], 25)))
             p75_a.append(float(np.percentile(ca[m, idx], 75)))
+            mb.append(float(cb[m, idx].mean()))
             p50_b.append(float(np.percentile(cb[m, idx], 50)))
             p25_b.append(float(np.percentile(cb[m, idx], 25)))
             p75_b.append(float(np.percentile(cb[m, idx], 75)))
-        ax.fill_between(gtm, p25_a, p75_a, color="#1f77b4", alpha=0.12)
-        ax.fill_between(gtm, p25_b, p75_b, color="#d62728", alpha=0.12)
-        ax.plot(gtm, p50_a, "o-", color="#1f77b4", markersize=3, linewidth=1.2, label="DER")
-        ax.plot(gtm, p50_b, "s-", color="#d62728", markersize=3, linewidth=1.2, label="gs")
-        mx = max(abs(np.array(gtm).min()), abs(np.array(gtm).max())) * 1.1
-        ax.plot([-mx, mx], [-mx, mx], "gray", linestyle=":", alpha=0.5)
-        ax.set_title(f"GT_{name}")
-        ax.set_xlabel(f"GT_{name}")
-        ax.set_ylabel(f"pred_{name} (p50, p25-p75)")
+        ax.fill_between(gtm, p25_a, p75_a, color="#1f77b4", alpha=0.08)
+        ax.fill_between(gtm, p25_b, p75_b, color="#d62728", alpha=0.08)
+        ax.plot(gtm, ma,   "o-", color="#1f77b4", markersize=3, linewidth=1.5, label="DER mean")
+        ax.plot(gtm, p50_a, "o--", color="#1f77b4", markersize=2, linewidth=0.8, alpha=0.5, label="DER med")
+        ax.plot(gtm, mb,   "s-", color="#d62728", markersize=3, linewidth=1.5, label="gs mean")
+        ax.plot(gtm, p50_b, "s--", color="#d62728", markersize=2, linewidth=0.8, alpha=0.5, label="gs med")
+        ax.set_ylabel(f"pred_{name} (— mean, -- med)")
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.2)
     fig.suptitle(f"{split}: prediction vs GT coordinate", fontsize=12)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "gt_conditioned.png"), dpi=200)
+    plt.close()
+
+
+def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """Scatter: |bias| (central tendency strength) vs mean_epi_std per GT bin."""
+    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+
+    epi = stats.epi_var_A.flatten()
+    ca, cb, gt = stats.coord_A, stats.coord_B, stats.coord_gt
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    for ax, name, idx in zip(axes, _axes_names, [0, 1, 2]):
+        gt_vals = gt[:, idx]
+        da = ca[:, idx] - gt_vals
+        db = cb[:, idx] - gt_vals
+        gt_edges = np.percentile(gt_vals, np.linspace(0, 100, 21))
+
+        gtm_list, epi_list, ct_a, ct_b = [], [], [], []
+        for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
+            m = (gt_vals >= lo) & (gt_vals < hi)
+            if m.sum() < 3:
+                continue
+            gtm_list.append(abs(float(gt_vals[m].mean())))
+            epi_list.append(float(epi[m].mean()))
+            ct_a.append(float(abs(da[m].mean())))
+            ct_b.append(float(abs(db[m].mean())))
+
+        sc_a = ax.scatter(epi_list, ct_a, c=gtm_list, cmap="viridis", s=30, alpha=0.8, label="DER")
+        sc_b = ax.scatter(epi_list, ct_b, c=gtm_list, cmap="viridis", s=30, alpha=0.8, marker="s", label="gs")
+        ax.set_title(f"GT_{name}")
+        ax.set_xlabel("mean epi_std")
+        ax.set_ylabel("|mean bias| (CT strength)")
+        ax.grid(True, alpha=0.2)
+    fig.colorbar(sc_a, ax=axes, label="|GT| (distance from origin)", shrink=0.6, pad=0.02)
+    fig.suptitle(f"{split}: central tendency vs uncertainty", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "ct_vs_uncertainty.png"), dpi=200)
     plt.close()

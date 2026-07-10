@@ -114,6 +114,9 @@ def _axis_analysis(epi, diff_a, diff_b, coord_a, coord_b, gt, axis_idx: int) -> 
             "p50_pred_gs":    float(np.percentile(cb[m], 50)),
             "p75_pred_gs":    float(np.percentile(cb[m], 75)),
             "var_bias_gs":    float(db[m].var()),
+            "mean_epi_std":   float(epi[m].mean()),
+            "ct_strength_DER": float(abs(da[m].mean())),
+            "ct_strength_gs":  float(abs(db[m].mean())),
         })
 
     return {
