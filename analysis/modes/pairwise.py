@@ -166,6 +166,13 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
             json.dump(result, open(fname, 'w'), indent=2)
             print(f"  {metric_name}: saved to {fname}")
 
+            # extra outputs (e.g. CSV)
+            csv_fn = getattr(metric_modules[metric_name], 'write_csv', None)
+            if csv_fn and no_cond:
+                csv_path = os.path.join(save_dir, 'alpha_joint_profile.csv')
+                csv_fn(result, csv_path)
+                print(f"    → {csv_path}")
+
             # quick summary
             if isinstance(result, dict) and 'overall' in result:
                 r0 = result.get('overall', result)

@@ -161,6 +161,46 @@ def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, gt_rang
     }
 
 
+def _alpha_joint_profile(coord_a, coord_b, gt, total_std, axis_idx: int, pred_step: str = "0.05") -> dict:
+    """2D bin: total_std (rows, 10 bins) × pred (cols, ~step bins), compute alpha."""
+    ca = coord_a[:, axis_idx]
+    gt_axis = gt[:, axis_idx]
+    eps = 1e-3
+
+    valid = np.abs(ca) >= eps
+    ca_v, gt_v, ts_v = ca[valid], gt_axis[valid], total_std[valid]
+    alpha_v = (gt_v - ca_v) / (ca_v * ts_v + 1e-12)
+
+    # total_std: 10 percentile bins
+    ts_edges = np.percentile(ts_v, np.linspace(0, 100, 11))
+    # pred: ~step bins from min to max
+    p_min, p_max = ca_v.min(), ca_v.max()
+    p_edges = np.arange(p_min, p_max + float(pred_step) * 0.5, float(pred_step))
+    p_edges = np.unique(np.round(p_edges, 8))
+
+    grid = []
+    for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+        m_t = (ts_v >= tlo) & (ts_v < thi)
+        for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+            m_p = (ca_v >= plo) & (ca_v < phi)
+            m = m_t & m_p
+            n = m.sum()
+            if n < 5:
+                continue
+            a = alpha_v[m]
+            grid.append({
+                "total_std_bin": i,   "total_std_lo": float(tlo),   "total_std_hi": float(thi),
+                "pred_bin":      j,   "pred_lo":      float(plo),   "pred_hi":      float(phi),
+                "n":             int(n),
+                "mean_alpha":    float(a.mean()),    "std_alpha":    float(a.std()),
+                "mean_GT":       float(gt_v[m].mean()),
+                "mean_pred":     float(ca_v[m].mean()),
+                "mean_total_std": float(ts_v[m].mean()),
+            })
+
+    return {"grid": grid, "total_std_edges": [float(e) for e in ts_edges], "pred_edges": [float(e) for e in p_edges]}
+
+
 def compute(stats: StatsAccumulator) -> dict:
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return {"error": "no epi_var_A"}
@@ -188,4 +228,25 @@ def compute(stats: StatsAccumulator) -> dict:
         "x": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["x"], step, 0),
         "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["y"], step, 1),
         "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["z"], step, 2),
+        "alpha_joint": {
+            "x": _alpha_joint_profile(ca, cb, gt, total_std, 0, "0.05"),
+            "y": _alpha_joint_profile(ca, cb, gt, total_std, 1, "0.05"),
+            "z": _alpha_joint_profile(ca, cb, gt, total_std, 2, "0.05"),
+        },
     }
+
+
+def write_csv(result: dict, save_path: str):
+    """Write alpha_joint_profile grid to CSV."""
+    import csv
+    rows = []
+    for ax in ['x', 'y', 'z']:
+        for cell in result['alpha_joint'][ax]['grid']:
+            cell['axis'] = ax
+            rows.append(cell)
+    if not rows:
+        return
+    with open(save_path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
