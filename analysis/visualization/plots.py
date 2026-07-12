@@ -248,10 +248,41 @@ def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None
         m = (epi >= lo) & (epi < hi)
         arf_fused[m] = ca[m] + alpha_table[i] * delta[m]
 
+    # ── H: Alpha-Joint Correction ──
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
+        total_std = np.sqrt(total_var)
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
+
+    ca_corr = ca.copy()
+    eps = 1e-3
+    for axis_idx in range(3):
+        cj_vals = ca[:, axis_idx]
+        gt_vals = gt[:, axis_idx]
+        ts = total_std
+        v = np.abs(cj_vals) >= eps
+        if v.sum() < 10: continue
+        cv, gv, tv = cj_vals[v], gt_vals[v], ts[v]
+        alpha_v = (gv - cv) / (cv * tv + 1e-12)
+        ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
+        p_min, p_max = cv.min(), cv.max()
+        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
+        p_edges = np.unique(np.round(p_edges, 8))
+        for tlo, thi in zip(ts_edges[:-1], ts_edges[1:]):
+            m_t = (tv >= tlo) & (tv < thi)
+            for plo, phi in zip(p_edges[:-1], p_edges[1:]):
+                m_p = (cv >= plo) & (cv < phi)
+                mc = m_t & m_p
+                if mc.sum() < 5: continue
+                ma = alpha_v[mc].mean()
+                m_full = (ts >= tlo) & (ts < thi) & (cj_vals >= plo) & (cj_vals < phi)
+                ca_corr[m_full, axis_idx] = cj_vals[m_full] + ma * cj_vals[m_full] * ts[m_full]
+
     dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
     pct_c = [(i * 10 + (i + 1) * 10) / 2 for i in range(10)]
 
-    mae = {"DER": [], "gs": [], "avg": [], "ARF": []}
+    mae = {"DER": [], "gs": [], "avg": [], "ARF": [], "H": []}
     for d in range(10):
         lo, hi = dec_edges[d], dec_edges[d + 1]
         m = (epi >= lo) & (epi < hi)
@@ -263,12 +294,13 @@ def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None
         mae["gs"].append(float(np.linalg.norm(cj - gm, axis=1).mean()))
         mae["avg"].append(float(np.linalg.norm((ci + cj) / 2.0 - gm, axis=1).mean()))
         mae["ARF"].append(float(np.linalg.norm(arf_fused[m] - gm, axis=1).mean()))
+        mae["H"].append(float(np.linalg.norm(ca_corr[m] - gm, axis=1).mean()))
 
-    colors = {"DER": "#1f77b4", "gs": "#d62728", "avg": "#7f7f7f", "ARF": "#2ca02c"}
-    labels = {"DER": "DER", "gs": "gs", "avg": "avg", "ARF": "ARF (gain-lookup)"}
+    colors = {"DER": "#1f77b4", "gs": "#d62728", "avg": "#7f7f7f", "ARF": "#2ca02c", "H": "#9467bd"}
+    labels = {"DER": "DER", "gs": "gs", "avg": "avg", "ARF": "ARF (gain-lookup)", "H": "H: alpha-joint correct"}
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    for k in ["DER", "gs", "avg", "ARF"]:
+    for k in ["DER", "gs", "avg", "ARF", "H"]:
         vals = mae[k]
         if all(np.isnan(v) for v in vals): continue
         ax.plot(pct_c, vals, "o-", color=colors[k], markersize=5, linewidth=1.5, label=labels[k])

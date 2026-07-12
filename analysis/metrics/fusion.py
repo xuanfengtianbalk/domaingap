@@ -1,19 +1,52 @@
-"""Adaptive Residual Fusion — per-axis alpha + consistency gate.
+"""Fusion methods.
 
-  For pixel in ventile bin k:
-    if cos_sim[k] > 0.9:
-        fused_x = DER_x + alpha_x[k] * (gs_x - DER_x)
-        fused_y = DER_y + alpha_y[k] * (gs_y - DER_y)
-        fused_z = DER_z + alpha_z[k] * (gs_z - DER_z)
-    else:
-        fused = DER
-
-Per-axis alpha built from per-axis mean_gain in each ventile.
+  ARF: per-axis alpha + cos_sim gate (retained for reference)
+  H:   Alpha-Joint Correction — 2D lookup (total_std × pred) corrects each axis
 """
 
 from __future__ import annotations
 import numpy as np
 from metrics.accumulator import StatsAccumulator
+
+
+def _alpha_joint_correct(coord_a, gt, total_std) -> np.ndarray:
+    """Per-axis correction using 2D alpha lookup table.
+
+    alpha = (GT - pred) / (pred * total_std)   per (total_std_bin, pred_bin) cell.
+    pred_corrected = pred + alpha * pred * total_std.
+    """
+    eps = 1e-3
+    corrected = coord_a.copy()
+    for axis_idx in range(3):
+        ca = coord_a[:, axis_idx]
+        gt_axis = gt[:, axis_idx]
+        ts = total_std
+
+        v = np.abs(ca) >= eps
+        if v.sum() < 10:
+            continue
+        cv, gv, tv = ca[v], gt_axis[v], ts[v]
+        alpha_v = (gv - cv) / (cv * tv + 1e-12)
+
+        ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
+        p_min, p_max = cv.min(), cv.max()
+        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
+        p_edges = np.unique(np.round(p_edges, 8))
+
+        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+            m_t = (tv >= tlo) & (tv < thi)
+            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                m_p = (cv >= plo) & (cv < phi)
+                m = m_t & m_p
+                if m.sum() < 5:
+                    continue
+                ma = alpha_v[m].mean()
+                # apply correction to ALL pixels in this cell
+                # (including those with |pred|<eps — they keep original value)
+                m_full = (ts >= tlo) & (ts < thi) & (ca >= plo) & (ca < phi)
+                corrected[m_full, axis_idx] = ca[m_full] + ma * ca[m_full] * ts[m_full]
+
+    return corrected
 
 
 def compute(stats: StatsAccumulator) -> dict:
@@ -114,6 +147,20 @@ def compute(stats: StatsAccumulator) -> dict:
     # ── per-decile MAE ──
     dec_edges = np.percentile(epi, np.linspace(0, 100, 11))
     dec_centers = [(i * 10 + (i + 1) * 10) / 2 for i in range(10)]
+
+    # ── H: Alpha-Joint Correction ──
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
+        total_std = np.sqrt(total_var)
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
+
+    ca_corr = _alpha_joint_correct(ca, gt, total_std)
+    e_corr = np.linalg.norm(ca_corr - gt, axis=1)
+    result["H_alpha_correct_mae"]  = float(e_corr.mean())
+    result["H_alpha_correct_rmse"] = float(np.sqrt((e_corr ** 2).mean()))
+
+    # ── per-decile (add H) ──
     decile = []
     for d in range(10):
         lo, hi = dec_edges[d], dec_edges[d + 1]
@@ -128,6 +175,7 @@ def compute(stats: StatsAccumulator) -> dict:
             "gs":  float(np.linalg.norm(cj - gm, axis=1).mean()),
             "avg": float(np.linalg.norm((ci + cj) / 2.0 - gm, axis=1).mean()),
             "ARF": float(np.linalg.norm(fused[m] - gm, axis=1).mean()),
+            "H_alpha_correct": float(np.linalg.norm(ca_corr[m] - gm, axis=1).mean()),
         })
     result["per_decile"] = decile
 
