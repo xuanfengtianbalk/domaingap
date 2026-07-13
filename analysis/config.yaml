@@ -40,6 +40,7 @@ visualization:
   - disagreement_ratio
   - gt_conditioned
   - ct_vs_uncertainty
+  - alpha_correct_vs_unc
 
 # GT coordinate ranges from speed_satellite_normed.glb
 # x/y/z mapping: data_x=GLB_X, data_y=GLB_Z, data_z=GLB_Y

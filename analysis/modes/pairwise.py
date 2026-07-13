@@ -224,5 +224,8 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "ct_vs_uncertainty":
                     from visualization.plots import plot_ct_vs_uncertainty
                     plot_ct_vs_uncertainty(stats, split, out_dir=viz_dir)
+                elif viz_name == "alpha_correct_vs_unc":
+                    from visualization.plots import plot_alpha_correct_vs_unc
+                    plot_alpha_correct_vs_unc(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")

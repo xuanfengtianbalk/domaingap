@@ -557,3 +557,78 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "ct_vs_uncertainty.png"), dpi=200)
     plt.close()
+
+
+def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """DER vs H (alpha-joint correct) MAE per total_std bin.
+    Two panels: percentile x-axis + actual value x-axis."""
+    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
+    ca, gt = stats.coord_A, stats.coord_gt
+
+    # Compute H (same logic as fusion.py)
+    ca_corr = ca.copy()
+    eps = 1e-3
+    for axis_idx in range(3):
+        cj_vals = ca[:, axis_idx]; gv_vals = gt[:, axis_idx]; ts = total_std
+        v = np.abs(cj_vals) >= eps
+        if v.sum() < 10: continue
+        cv, gv, tv = cj_vals[v], gv_vals[v], ts[v]
+        alpha_v = (gv - cv) / (cv * tv + 1e-12)
+        ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
+        p_min, p_max = cv.min(), cv.max()
+        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
+        for tlo, thi in zip(ts_edges[:-1], ts_edges[1:]):
+            m_t = (tv >= tlo) & (tv < thi)
+            for plo, phi in zip(p_edges[:-1], p_edges[1:]):
+                m_p = (cv >= plo) & (cv < phi)
+                mc = m_t & m_p
+                if mc.sum() < 5: continue
+                ma = alpha_v[mc].mean()
+                m_full = (ts >= tlo) & (ts < thi) & (cj_vals >= plo) & (cj_vals < phi)
+                ca_corr[m_full, axis_idx] = cj_vals[m_full] + ma * cj_vals[m_full] * ts[m_full]
+
+    # Bin by total_std (10 percentile bins, same as CSV)
+    ts_edges = np.percentile(total_std, np.linspace(0, 100, 11))
+    ts_centers_pct = [(i + 0.5) * 10 for i in range(10)]
+    ts_centers_val = []
+    der_mae, h_mae = [], []
+
+    for lo, hi in zip(ts_edges[:-1], ts_edges[1:]):
+        m = (total_std >= lo) & (total_std < hi)
+        if m.sum() < 10:
+            continue
+        ts_centers_val.append(float(total_std[m].mean()))
+        der_mae.append(float(np.linalg.norm(ca[m] - gt[m], axis=1).mean()))
+        h_mae.append(float(np.linalg.norm(ca_corr[m] - gt[m], axis=1).mean()))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2))
+
+    ax1.plot(ts_centers_pct, der_mae, "bo-", markersize=5, linewidth=1.5, label="DER")
+    ax1.plot(ts_centers_pct, h_mae,  "mo-", markersize=5, linewidth=1.5, label="H (alpha-correct)")
+    ax1.set_xlabel("total_std percentile")
+    ax1.set_ylabel("MAE")
+    ax1.set_title(f"{split}: MAE per total_std percentile")
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.2)
+    ax1.set_xlim(0, 100)
+
+    ax2.plot(ts_centers_val, der_mae, "bo-", markersize=5, linewidth=1.5, label="DER")
+    ax2.plot(ts_centers_val, h_mae,  "mo-", markersize=5, linewidth=1.5, label="H (alpha-correct)")
+    ax2.set_xlabel("mean total_std")
+    ax2.set_ylabel("MAE")
+    ax2.set_title(f"{split}: MAE per total_std value")
+    ax2.set_xscale("log")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "alpha_correct_vs_unc.png"), dpi=200)
+    plt.close()
