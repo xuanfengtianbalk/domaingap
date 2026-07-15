@@ -697,16 +697,16 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
                 m = (tv >= tlo) & (tv < thi) & (cv >= plo) & (cv < phi)
                 if m.sum() < 5:
                     continue
-                xs.append(float(cv[m].mean()))    # X = pred
-                ys.append(float(tv[m].mean()))    # Y = total_std
-                zs.append(float(alpha_v[m].mean()))  # Z = alpha
+                xs.append(float(cv[m].mean()))
+                ys.append(float(np.log10(tv[m].mean() + 1e-12)))
+                zs.append(float(alpha_v[m].mean()))
 
             tsm = float(tv[(tv >= tlo) & (tv < thi)].mean())
             ax.plot(xs, ys, zs, "o-", color=colors[tpi], markersize=3, linewidth=1.2,
                     label=f"std≈{tsm:.2e}")
 
         ax.set_xlabel("pred")
-        ax.set_ylabel("total_std")
+        ax.set_ylabel("log10(total_std)")
         ax.set_zlabel("alpha")
         ax.set_title(f"GT_{key}")
         ax.legend(fontsize=6)
