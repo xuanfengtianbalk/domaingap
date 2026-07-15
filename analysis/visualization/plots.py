@@ -642,3 +642,76 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "alpha_correct_vs_unc.png"), dpi=200)
     plt.close()
+
+
+def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """3-panel heatmap: total_std × pred → alpha, one per axis (x/y/z)."""
+    if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
+        return
+    save_dir = out_dir or os.path.join(OUT_DIR, split)
+    os.makedirs(save_dir, exist_ok=True)
+
+    import yaml
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    gr = cfg["gt_ranges"]
+    step = gr["bin_step"]
+    n_ts_bins = gr.get("n_total_std_bins", 10)
+
+    if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
+    else:
+        total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
+    ca, gt = stats.coord_A, stats.coord_gt
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    keys = ["x", "y", "z"]
+    for ax, key, idx in zip(axes, keys, [0, 1, 2]):
+        cj, gv = ca[:, idx], gt[:, idx]
+        ts = total_std
+        eps = 1e-3
+        valid = np.abs(cj) >= eps
+        if valid.sum() < 10:
+            continue
+        cv, gv_v, tv = cj[valid], gv[valid], ts[valid]
+        alpha_v = (gv_v - cv) / (cv * tv + 1e-12)
+
+        ts_edges = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
+        gr_ax = gr[key]
+        inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+
+        grid = np.full((n_ts_bins, len(p_edges) - 1), np.nan)
+        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+            m_t = (tv >= tlo) & (tv < thi)
+            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                m_p = (cv >= plo) & (cv < phi)
+                mc = m_t & m_p
+                if mc.sum() < 5:
+                    continue
+                grid[i, j] = float(alpha_v[mc].mean())
+
+        # %%
+        import matplotlib.colors as mcolors
+        norm = mcolors.TwoSlopeNorm(vcenter=0)
+        im = ax.pcolormesh(np.arange(len(p_edges)), np.arange(n_ts_bins + 1), grid,
+                           cmap="RdBu_r", norm=norm, alpha=0.9, edgecolors="white", linewidth=0.3)
+        # ticks: show physical pred values at reasonable intervals
+        n_pred = len(p_edges) - 1
+        tick_step = max(1, n_pred // 5)
+        pred_ticks = np.arange(0, n_pred, tick_step)
+        pred_labels = [f"{p_edges[t]:.2f}" if np.isfinite(p_edges[t]) else "overflow" for t in pred_ticks]
+        ax.set_xticks(pred_ticks + 0.5)
+        ax.set_xticklabels(pred_labels, fontsize=6, rotation=45)
+        ax.set_yticks(np.arange(n_ts_bins) + 0.5)
+        ax.set_yticklabels([f"p{i*10}" for i in range(n_ts_bins)], fontsize=6)
+        ax.set_title(f"GT_{key}")
+        ax.set_xlabel("pred")
+        ax.set_ylabel("total_std percentile")
+
+    plt.colorbar(im, ax=axes, label="mean_alpha", shrink=0.8, pad=0.02)
+    fig.suptitle(f"{split}: alpha joint profile  (total_std × pred → alpha)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "alpha_joint_3d.png"), dpi=200)
+    plt.close()
