@@ -161,8 +161,8 @@ def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, gt_rang
     }
 
 
-def _alpha_joint_profile(coord_a, coord_b, gt, total_std, axis_idx: int, pred_step: str = "0.05", n_ts_bins: int = 10) -> dict:
-    """2D bin: total_std (rows, n_ts_bins bins) × pred (cols, ~step bins), compute alpha."""
+def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_idx: int, n_ts_bins: int = 10) -> dict:
+    """2D bin: total_std (rows, n_ts_bins bins) × pred (cols, config range + overflow edges)."""
     ca = coord_a[:, axis_idx]
     gt_axis = gt[:, axis_idx]
     eps = 1e-3
@@ -172,10 +172,8 @@ def _alpha_joint_profile(coord_a, coord_b, gt, total_std, axis_idx: int, pred_st
     alpha_v = (gt_v - ca_v) / (ca_v * ts_v + 1e-12)
 
     ts_edges = np.percentile(ts_v, np.linspace(0, 100, n_ts_bins + 1))
-    # pred: ~step bins from min to max
-    p_min, p_max = ca_v.min(), ca_v.max()
-    p_edges = np.arange(p_min, p_max + float(pred_step) * 0.5, float(pred_step))
-    p_edges = np.unique(np.round(p_edges, 8))
+    inner = np.arange(gt_range[0], gt_range[1] + step * 0.5, step)
+    p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
     grid = []
     for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
@@ -229,9 +227,9 @@ def compute(stats: StatsAccumulator) -> dict:
         "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["y"], step, 1),
         "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["z"], step, 2),
         "alpha_joint": {
-            "x": _alpha_joint_profile(ca, cb, gt, total_std, 0, "0.05", n_ts_bins),
-            "y": _alpha_joint_profile(ca, cb, gt, total_std, 1, "0.05", n_ts_bins),
-            "z": _alpha_joint_profile(ca, cb, gt, total_std, 2, "0.05", n_ts_bins),
+            "x": _alpha_joint_profile(ca, cb, gt, total_std, gr["x"], step, 0, n_ts_bins),
+            "y": _alpha_joint_profile(ca, cb, gt, total_std, gr["y"], step, 1, n_ts_bins),
+            "z": _alpha_joint_profile(ca, cb, gt, total_std, gr["z"], step, 2, n_ts_bins),
         },
     }
 

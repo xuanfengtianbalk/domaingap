@@ -572,6 +572,8 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     n_ts_bins = cfg["gt_ranges"].get("n_total_std_bins", 10)
+    gr = cfg["gt_ranges"]
+    step = gr["bin_step"]
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
@@ -580,6 +582,7 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     ca, gt = stats.coord_A, stats.coord_gt
 
     # Compute H (same logic as fusion.py)
+    keys = ["x", "y", "z"]
     ca_corr = ca.copy()
     eps = 1e-3
     for axis_idx in range(3):
@@ -589,8 +592,9 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
         cv, gv, tv = cj_vals[v], gv_vals[v], ts[v]
         alpha_v = (gv - cv) / (cv * tv + 1e-12)
         ts_edges_h = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
-        p_min, p_max = cv.min(), cv.max()
-        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
+        gr_ax = gr[keys[axis_idx]]
+        inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
         for tlo, thi in zip(ts_edges_h[:-1], ts_edges_h[1:]):
             m_t = (tv >= tlo) & (tv < thi)
             for plo, phi in zip(p_edges[:-1], p_edges[1:]):

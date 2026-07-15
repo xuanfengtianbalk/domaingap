@@ -9,14 +9,16 @@ import numpy as np
 from metrics.accumulator import StatsAccumulator
 
 
-def _alpha_joint_correct(coord_a, gt, total_std) -> np.ndarray:
+def _alpha_joint_correct(coord_a, gt, total_std, gt_ranges, step) -> np.ndarray:
     """Per-axis correction using 2D alpha lookup table.
 
     alpha = (GT - pred) / (pred * total_std)   per (total_std_bin, pred_bin) cell.
     pred_corrected = pred + alpha * pred * total_std.
+    Pred bins from config gt_ranges, overflow → outermost bins.
     """
     eps = 1e-3
     corrected = coord_a.copy()
+    keys = ["x", "y", "z"]
     for axis_idx in range(3):
         ca = coord_a[:, axis_idx]
         gt_axis = gt[:, axis_idx]
@@ -29,9 +31,9 @@ def _alpha_joint_correct(coord_a, gt, total_std) -> np.ndarray:
         alpha_v = (gv - cv) / (cv * tv + 1e-12)
 
         ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
-        p_min, p_max = cv.min(), cv.max()
-        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
-        p_edges = np.unique(np.round(p_edges, 8))
+        gr = gt_ranges[keys[axis_idx]]
+        inner = np.arange(gr[0], gr[1] + step * 0.5, step)
+        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
             m_t = (tv >= tlo) & (tv < thi)
@@ -149,13 +151,20 @@ def compute(stats: StatsAccumulator) -> dict:
     dec_centers = [(i * 10 + (i + 1) * 10) / 2 for i in range(10)]
 
     # ── H: Alpha-Joint Correction ──
+    import yaml, os
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    gr = cfg["gt_ranges"]
+    step = gr["bin_step"]
+
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
         total_std = np.sqrt(total_var)
     else:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
 
-    ca_corr = _alpha_joint_correct(ca, gt, total_std)
+    ca_corr = _alpha_joint_correct(ca, gt, total_std, gr, step)
     e_corr = np.linalg.norm(ca_corr - gt, axis=1)
     result["H_alpha_correct_mae"]  = float(e_corr.mean())
     result["H_alpha_correct_rmse"] = float(np.sqrt((e_corr ** 2).mean()))
