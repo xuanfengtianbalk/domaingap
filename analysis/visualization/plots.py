@@ -659,6 +659,7 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     n_ts_bins = gr.get("n_total_std_bins", 10)
+    view = cfg.get("view_3d", {"elev": 25, "azim": -45})
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
@@ -710,7 +711,7 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
         ax.set_zlabel("alpha")
         ax.set_title(f"GT_{key}")
         ax.legend(fontsize=6)
-        ax.view_init(elev=25, azim=-45)
+        ax.view_init(elev=view["elev"], azim=view["azim"])
 
     fig.suptitle(f"{split}: alpha joint 3D  (X=pred, Y=total_std, Z=alpha)", fontsize=12)
     plt.tight_layout()
