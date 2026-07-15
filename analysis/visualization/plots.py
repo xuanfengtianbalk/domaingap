@@ -644,8 +644,8 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     plt.close()
 
 
-def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """3-panel heatmap: total_std × pred → alpha, one per axis (x/y/z)."""
+def plot_alpha_joint_lines(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """3-panel line chart: total_std (x, actual values) × alpha (y), one curve per pred bin."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
@@ -681,37 +681,45 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
         gr_ax = gr[key]
         inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
         p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+        n_pred = len(p_edges) - 1
 
-        grid = np.full((n_ts_bins, len(p_edges) - 1), np.nan)
-        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-            m_t = (tv >= tlo) & (tv < thi)
-            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+        # pick ~5 representative pred bins (skip overflow unless they have data)
+        picks = [0, n_pred // 4, n_pred // 2, 3 * n_pred // 4, n_pred - 1]
+        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(picks)))
+
+        for pi, pj in enumerate(picks):
+            if pj >= n_pred:
+                continue
+            plo, phi = p_edges[pj], p_edges[pj + 1]
+            # collect (mean_ts, mean_alpha) per ts bin
+            xs, ys = [], []
+            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+                m_t = (tv >= tlo) & (tv < thi)
                 m_p = (cv >= plo) & (cv < phi)
                 mc = m_t & m_p
                 if mc.sum() < 5:
                     continue
-                grid[i, j] = float(alpha_v[mc].mean())
+                xs.append(float(tv[mc].mean()))
+                ys.append(float(alpha_v[mc].mean()))
 
-        # %%
-        import matplotlib.colors as mcolors
-        norm = mcolors.TwoSlopeNorm(vcenter=0)
-        im = ax.pcolormesh(np.arange(len(p_edges)), np.arange(n_ts_bins + 1), grid,
-                           cmap="RdBu_r", norm=norm, alpha=0.9, edgecolors="white", linewidth=0.3)
-        # ticks: show physical pred values at reasonable intervals
-        n_pred = len(p_edges) - 1
-        tick_step = max(1, n_pred // 5)
-        pred_ticks = np.arange(0, n_pred, tick_step)
-        pred_labels = [f"{p_edges[t]:.2f}" if np.isfinite(p_edges[t]) else "overflow" for t in pred_ticks]
-        ax.set_xticks(pred_ticks + 0.5)
-        ax.set_xticklabels(pred_labels, fontsize=6, rotation=45)
-        ax.set_yticks(np.arange(n_ts_bins) + 0.5)
-        ax.set_yticklabels([f"p{i*10}" for i in range(n_ts_bins)], fontsize=6)
+            if plo == -np.inf:
+                label = f"pred < {phi:.2f}"
+            elif phi == np.inf:
+                label = f"pred > {plo:.2f}"
+            else:
+                label = f"pred∈[{plo:.1f},{phi:.1f})"
+
+            ax.plot(xs, ys, "o-", color=colors[pi], markersize=4, linewidth=1.2, label=label)
+
+        ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
         ax.set_title(f"GT_{key}")
-        ax.set_xlabel("pred")
-        ax.set_ylabel("total_std percentile")
+        ax.set_xlabel("mean total_std")
+        ax.set_ylabel("mean_alpha")
+        ax.set_xscale("log")
+        ax.legend(fontsize=6, ncol=1, loc="best")
+        ax.grid(True, alpha=0.15)
 
-    plt.colorbar(im, ax=axes, label="mean_alpha", shrink=0.8, pad=0.02)
     fig.suptitle(f"{split}: alpha joint profile  (total_std × pred → alpha)", fontsize=12)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "alpha_joint_3d.png"), dpi=200)
+    plt.savefig(os.path.join(save_dir, "alpha_joint_lines.png"), dpi=200)
     plt.close()

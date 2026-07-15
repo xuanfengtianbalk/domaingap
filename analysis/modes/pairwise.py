@@ -227,8 +227,8 @@ def run_pairwise(uuid_1, uuid_2, splits, max_samples=None, batch_size=1, device=
                 elif viz_name == "alpha_correct_vs_unc":
                     from visualization.plots import plot_alpha_correct_vs_unc
                     plot_alpha_correct_vs_unc(stats, split, out_dir=viz_dir)
-                elif viz_name == "alpha_joint_3d":
-                    from visualization.plots import plot_alpha_joint_3d
-                    plot_alpha_joint_3d(stats, split, out_dir=viz_dir)
+                elif viz_name == "alpha_joint_lines":
+                    from visualization.plots import plot_alpha_joint_lines
+                    plot_alpha_joint_lines(stats, split, out_dir=viz_dir)
 
     print(f"\nDone! Results in {base_out}/")
