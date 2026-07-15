@@ -567,6 +567,12 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
 
+    import yaml
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    n_ts_bins = cfg["gt_ranges"].get("n_total_std_bins", 10)
+
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
     else:
@@ -582,10 +588,10 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
         if v.sum() < 10: continue
         cv, gv, tv = cj_vals[v], gv_vals[v], ts[v]
         alpha_v = (gv - cv) / (cv * tv + 1e-12)
-        ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
+        ts_edges_h = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
         p_min, p_max = cv.min(), cv.max()
         p_edges = np.arange(p_min, p_max + 0.025, 0.05)
-        for tlo, thi in zip(ts_edges[:-1], ts_edges[1:]):
+        for tlo, thi in zip(ts_edges_h[:-1], ts_edges_h[1:]):
             m_t = (tv >= tlo) & (tv < thi)
             for plo, phi in zip(p_edges[:-1], p_edges[1:]):
                 m_p = (cv >= plo) & (cv < phi)
@@ -595,9 +601,9 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
                 m_full = (ts >= tlo) & (ts < thi) & (cj_vals >= plo) & (cj_vals < phi)
                 ca_corr[m_full, axis_idx] = cj_vals[m_full] + ma * cj_vals[m_full] * ts[m_full]
 
-    # Bin by total_std (10 percentile bins, same as CSV)
-    ts_edges = np.percentile(total_std, np.linspace(0, 100, 11))
-    ts_centers_pct = [(i + 0.5) * 10 for i in range(10)]
+    # Bin by total_std (same n_ts_bins as CSV)
+    ts_edges = np.percentile(total_std, np.linspace(0, 100, n_ts_bins + 1))
+    ts_centers_pct = [(i + 0.5) * (100.0 / n_ts_bins) for i in range(n_ts_bins)]
     ts_centers_val = []
     der_mae, h_mae = [], []
 

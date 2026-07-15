@@ -7,7 +7,7 @@ pairwise:
   uuid_1: "e24d72fb-b4d7-4c40-b00a-a4aa2f8213e8"
   uuid_2: "ec59650b-44d2-4da5-b4e4-8e2f84237cd8"
   splits: [sunlamp, lightbox, validation]
-  max_samples: 10000
+  max_samples: 100
 metrics:
   - correlation
   - winrate
@@ -49,3 +49,4 @@ gt_ranges:
   y: [-0.52, 0.60]
   z: [0.00, 0.33]
   bin_step: 0.05
+  n_total_std_bins: 10
