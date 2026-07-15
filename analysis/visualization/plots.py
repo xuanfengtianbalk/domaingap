@@ -644,13 +644,14 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     plt.close()
 
 
-def plot_alpha_joint_lines(stats: StatsAccumulator, split: str, out_dir: str | None = None):
-    """3-panel line chart: total_std (x, actual values) × alpha (y), one curve per pred bin."""
+def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None = None):
+    """3-panel 3D line chart: X=pred, Y=total_std, Z=alpha, curves grouped by total_std bin."""
     if stats.epi_var_A is None or len(stats.epi_var_A) == 0:
         return
     save_dir = out_dir or os.path.join(OUT_DIR, split)
     os.makedirs(save_dir, exist_ok=True)
 
+    from mpl_toolkits.mplot3d import Axes3D
     import yaml
     cfg_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
     with open(cfg_path) as f:
@@ -665,9 +666,9 @@ def plot_alpha_joint_lines(stats: StatsAccumulator, split: str, out_dir: str | N
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
     ca, gt = stats.coord_A, stats.coord_gt
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig = plt.figure(figsize=(18, 6))
     keys = ["x", "y", "z"]
-    for ax, key, idx in zip(axes, keys, [0, 1, 2]):
+    for pi, (key, idx) in enumerate(zip(keys, [0, 1, 2])):
         cj, gv = ca[:, idx], gt[:, idx]
         ts = total_std
         eps = 1e-3
@@ -683,43 +684,35 @@ def plot_alpha_joint_lines(stats: StatsAccumulator, split: str, out_dir: str | N
         p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
         n_pred = len(p_edges) - 1
 
-        # pick ~5 representative pred bins (skip overflow unless they have data)
-        picks = [0, n_pred // 4, n_pred // 2, 3 * n_pred // 4, n_pred - 1]
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(picks)))
+        ax = fig.add_subplot(1, 3, pi + 1, projection="3d")
+        # Pick ~5 representative total_std bins
+        pick_ts = [0, n_ts_bins // 4, n_ts_bins // 2, 3 * n_ts_bins // 4, n_ts_bins - 1]
+        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(pick_ts)))
 
-        for pi, pj in enumerate(picks):
-            if pj >= n_pred:
-                continue
-            plo, phi = p_edges[pj], p_edges[pj + 1]
-            # collect (mean_ts, mean_alpha) per ts bin
-            xs, ys = [], []
-            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-                m_t = (tv >= tlo) & (tv < thi)
-                m_p = (cv >= plo) & (cv < phi)
-                mc = m_t & m_p
-                if mc.sum() < 5:
+        for tpi, ti in enumerate(pick_ts):
+            tlo, thi = ts_edges[ti], ts_edges[ti + 1]
+            xs, ys, zs = [], [], []
+            for pj in range(n_pred):
+                plo, phi = p_edges[pj], p_edges[pj + 1]
+                m = (tv >= tlo) & (tv < thi) & (cv >= plo) & (cv < phi)
+                if m.sum() < 5:
                     continue
-                xs.append(float(tv[mc].mean()))
-                ys.append(float(alpha_v[mc].mean()))
+                xs.append(float(cv[m].mean()))    # X = pred
+                ys.append(float(tv[m].mean()))    # Y = total_std
+                zs.append(float(alpha_v[m].mean()))  # Z = alpha
 
-            if plo == -np.inf:
-                label = f"pred < {phi:.2f}"
-            elif phi == np.inf:
-                label = f"pred > {plo:.2f}"
-            else:
-                label = f"pred∈[{plo:.1f},{phi:.1f})"
+            tsm = float(tv[(tv >= tlo) & (tv < thi)].mean())
+            ax.plot(xs, ys, zs, "o-", color=colors[tpi], markersize=3, linewidth=1.2,
+                    label=f"std≈{tsm:.2e}")
 
-            ax.plot(xs, ys, "o-", color=colors[pi], markersize=4, linewidth=1.2, label=label)
-
-        ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
+        ax.set_xlabel("pred")
+        ax.set_ylabel("total_std")
+        ax.set_zlabel("alpha")
         ax.set_title(f"GT_{key}")
-        ax.set_xlabel("mean total_std")
-        ax.set_ylabel("mean_alpha")
-        ax.set_xscale("log")
-        ax.legend(fontsize=6, ncol=1, loc="best")
-        ax.grid(True, alpha=0.15)
+        ax.legend(fontsize=6)
+        ax.view_init(elev=25, azim=-45)
 
-    fig.suptitle(f"{split}: alpha joint profile  (total_std × pred → alpha)", fontsize=12)
+    fig.suptitle(f"{split}: alpha joint 3D  (X=pred, Y=total_std, Z=alpha)", fontsize=12)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "alpha_joint_lines.png"), dpi=200)
+    plt.savefig(os.path.join(save_dir, "alpha_joint_3d.png"), dpi=200)
     plt.close()
