@@ -566,25 +566,24 @@ def _correct_with_alpha(pred_by_ax, ts_by_ax, alpha_tbl):
 
 def _plot_alpha_correct_vs_unc_for(pred_by_ax, gt_by_ax, ts_by_ax, alpha_tbl, n_ts_bins, save_path_base, tag=""):
     """DER vs H MAE per total_std bin (percentile + value panels)."""
-    ts_edges = np.percentile(np.concatenate(ts_by_ax), np.linspace(0, 100, n_ts_bins + 1))
+    # scalar total_std per pixel: sqrt(ts_x² + ts_y² + ts_z²)
+    ts_scalar = np.sqrt(ts_by_ax[0]**2 + ts_by_ax[1]**2 + ts_by_ax[2]**2)
+    ts_edges = np.percentile(ts_scalar, np.linspace(0, 100, n_ts_bins + 1))
     pct_c = [(i + 0.5) * (100.0 / n_ts_bins) for i in range(n_ts_bins)]
     corrected = _correct_with_alpha(pred_by_ax, ts_by_ax, alpha_tbl)
 
     der_mae, h_mae, ts_val = [], [], []
     for lo, hi in zip(ts_edges[:-1], ts_edges[1:]):
-        m = np.zeros_like(ts_by_ax[0], dtype=bool)
-        for ax in range(3):
-            m |= (ts_by_ax[ax] >= lo) & (ts_by_ax[ax] < hi)
+        m = (ts_scalar >= lo) & (ts_scalar < hi)
         if m.sum() < 10:
             continue
-        der_err = np.sqrt((corrected[0][m]-gt_by_ax[0][m])**2 + (corrected[0][m]-gt_by_ax[0][m])**2)  # placeholder
-        der_all = np.sqrt(((pred_by_ax[0][m]-gt_by_ax[0][m])**2).astype(float) + 
+        der_all = np.sqrt(((pred_by_ax[0][m]-gt_by_ax[0][m])**2).astype(float) +
                           ((pred_by_ax[1][m]-gt_by_ax[1][m])**2).astype(float) +
                           ((pred_by_ax[2][m]-gt_by_ax[2][m])**2).astype(float))
         h_all = np.sqrt(((corrected[0][m]-gt_by_ax[0][m])**2).astype(float) +
                         ((corrected[1][m]-gt_by_ax[1][m])**2).astype(float) +
                         ((corrected[2][m]-gt_by_ax[2][m])**2).astype(float))
-        ts_val.append(float(np.concatenate([ts_by_ax[a][m] for a in range(3)]).mean()))
+        ts_val.append(float(ts_scalar[m].mean()))
         der_mae.append(float(der_all.mean()))
         h_mae.append(float(h_all.mean()))
 
