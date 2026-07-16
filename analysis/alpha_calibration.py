@@ -186,27 +186,30 @@ def compute_calibration_torch(pre, gt, pre_delta, conf=10, alpha_ci=0.05, return
 
 
 def _plot_calibration_curve(calibration: dict, save_path: str):
-    """Reliability diagram: alpha vs coverage, 3 axes (x/y/z)."""
-    fig, ax = plt.subplots(figsize=(6, 5))
-    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
-    for key in ["x", "y", "z"]:
-        c = calibration[key]
+    """Reliability diagram: alpha vs coverage, one curve per epsilon."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    eps_keys = sorted(calibration.keys(), key=float)
+    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(eps_keys)))
+    for ki, eps_k in enumerate(eps_keys):
+        c = calibration[eps_k]
+        if c.get("n_pixels", 0) == 0:
+            continue
         alphas = np.array(c["alphas"])
         coverages = np.array(c["coverages"])
         ci_lo = np.array(c["ci_lower"])
         ci_hi = np.array(c["ci_upper"])
         errs = c["errors"]
-        label = f"{key} (MAE={errs['MAE']:.3f})"
-        ax.fill_between(alphas, ci_lo, ci_hi, color=colors[key], alpha=0.1)
-        ax.plot(alphas, coverages, "o-", color=colors[key], markersize=4, linewidth=1.2, label=label)
+        label = f"ε={eps_k} (MAE={errs['MAE']:.3f})"
+        ax.fill_between(alphas, ci_lo, ci_hi, color=colors[ki], alpha=0.08)
+        ax.plot(alphas, coverages, "o-", color=colors[ki], markersize=4, linewidth=1.2, label=label)
     ax.plot([0, 1], [0, 1], "k--", alpha=0.3, label="perfect")
     ax.set_xlabel("Confidence level (alpha)")
     ax.set_ylabel("Actual coverage")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1.05)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
     ax.grid(True, alpha=0.2)
-    ax.set_title("Reliability Calibration Curve")
+    ax.set_title("Reliability Calibration Curve (per FGSM epsilon)")
     plt.tight_layout()
     plt.savefig(save_path, dpi=200)
     plt.close()
@@ -244,6 +247,13 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     alpha_preds, alpha_ts, alpha_gts = [], [], []      # per-pixel for alpha table
 
+    # Per-epsilon calibration accumulators (sampled, max ~200k/axis/epsilon)
+    MAX_CALIB_PIX = 200_000
+    calib_preds = {str(e): [[], [], []] for e in epsilons}   # {eps: [ax0_list, ax1_list, ax2_list]}
+    calib_gts   = {str(e): [[], [], []] for e in epsilons}
+    calib_ts    = {str(e): [[], [], []] for e in epsilons}
+    calib_counts = {str(e): [0, 0, 0] for e in epsilons}     # pixels collected per axis
+
     n_images = 0
     for samples, targets in tqdm(dl, desc="Calibrating", ncols=80):
         image = samples.to(device)                                  # (1, 3, H, W)
@@ -260,10 +270,10 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         # --- collect alpha pixels (clean data) ---
         m_valid = (mask_gt > 0.5).numpy()
         if m_valid.sum() > 0 and total_std_clean is not None:
-            ts_arr = total_std_clean.squeeze(0)                             # (3, H, W) if batched
-            if ts_arr.ndim == 3:                                            # per-coord channel
+            ts_arr = total_std_clean.squeeze(0)
+            if ts_arr.ndim == 3:
                 ts_pix = ts_arr[:, m_valid]
-            else:                                                           # (H, W) scalar
+            else:
                 ts_pix = np.broadcast_to(ts_arr[m_valid][np.newaxis, :], (3, m_valid.sum()))
             for ax in range(3):
                 p = pred_clean[ax, m_valid]
@@ -279,6 +289,30 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 outputs_raw_adv = model(adv)
             full_adv = _extract_from_raw(outputs_raw_adv, model_type)
             total_std_adv = _total_std_from_full(full_adv)
+
+            # collect sampled calibration pixels (attacked)
+            if m_valid.sum() > 0 and total_std_adv is not None:
+                pred_adv = full_adv["coords"][0].numpy()
+                ts_arr_adv = total_std_adv.squeeze(0)
+                if ts_arr_adv.ndim == 3:
+                    ts_pix_adv = ts_arr_adv[:, m_valid]
+                else:
+                    ts_pix_adv = np.broadcast_to(ts_arr_adv[m_valid][np.newaxis, :], (3, m_valid.sum()))
+                n_pix = int(m_valid.sum())
+                k = str(eps)
+                for ax in range(3):
+                    need = MAX_CALIB_PIX - calib_counts[k][ax]
+                    if need <= 0:
+                        continue
+                    take = min(n_pix, need)
+                    if take < n_pix:
+                        idx = np.random.choice(n_pix, take, replace=False)
+                    else:
+                        idx = slice(None)
+                    calib_preds[k][ax].append(pred_adv[ax, m_valid][idx])
+                    calib_gts[k][ax].append(coors_gt[0, ax, m_valid].numpy()[idx])
+                    calib_ts[k][ax].append(ts_pix_adv[ax][idx])
+                    calib_counts[k][ax] += take
 
             angle, dist, _, _ = compute_pose_one(outputs_raw_adv,
                                            torch.round(targets["boxes"].squeeze(0)),
@@ -369,19 +403,29 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             "pred_edges": [float(e) for e in p_edges],
         }
 
-    # --- calibration reliability (alpha vs coverage) ---
+    # --- calibration reliability (alpha vs coverage per epsilon) ---
     calibration = {}
-    for ax_idx, key in enumerate(["x", "y", "z"]):
-        p = alpha_preds[ax_idx::3]
-        g = alpha_gts[ax_idx::3]
-        d = alpha_ts[ax_idx::3]
-        al, co, cl, cu, errs = compute_calibration_torch(
-            torch.tensor(p), torch.tensor(g), torch.tensor(d), conf=10)
-        calibration[key] = {
-            "alphas": al.tolist(), "coverages": co.tolist(),
-            "ci_lower": cl.tolist(), "ci_upper": cu.tolist(),
-            "errors": errs,
-        }
+    for eps in epsilons:
+        k = str(eps)
+        cp_all, cg_all, ct_all = [], [], []
+        for ax in range(3):
+            if calib_preds[k][ax]:
+                cp_all.append(np.concatenate(calib_preds[k][ax]))
+                cg_all.append(np.concatenate(calib_gts[k][ax]))
+                ct_all.append(np.concatenate(calib_ts[k][ax]))
+        if cp_all:
+            p = np.concatenate(cp_all)
+            g = np.concatenate(cg_all)
+            d = np.concatenate(ct_all)
+            al, co, cl, cu, errs = compute_calibration_torch(
+                torch.tensor(p), torch.tensor(g), torch.tensor(d), conf=10)
+            calibration[k] = {
+                "alphas": al.tolist(), "coverages": co.tolist(),
+                "ci_lower": cl.tolist(), "ci_upper": cu.tolist(),
+                "errors": errs, "n_pixels": int(len(p)),
+            }
+        else:
+            calibration[k] = {"n_pixels": 0}
 
     # --- write outputs ---
     out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
