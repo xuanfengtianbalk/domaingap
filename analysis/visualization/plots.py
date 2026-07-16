@@ -275,7 +275,12 @@ def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None
                 m_p = (cv >= plo) & (cv < phi)
                 mc = m_t & m_p
                 if mc.sum() < 5: continue
-                ma = alpha_v[mc].mean()
+                a = alpha_v[mc]
+                if mc.sum() >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    ma = a[(a >= lo_a) & (a <= hi_a)].mean()
+                else:
+                    ma = a.mean()
                 m_full = (ts >= tlo) & (ts < thi) & (cj_vals >= plo) & (cj_vals < phi)
                 ca_corr[m_full, axis_idx] = cj_vals[m_full] + ma * cj_vals[m_full] * ts[m_full]
 
@@ -572,8 +577,10 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     n_ts_bins = cfg["gt_ranges"].get("n_total_std_bins", 10)
+    trim_pct = cfg["gt_ranges"].get("trim_pct", 0.1)
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
+    trim_pct = gr.get("trim_pct", 0.1)
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))
@@ -581,7 +588,7 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
     ca, gt = stats.coord_A, stats.coord_gt
 
-    # Compute H (same logic as fusion.py)
+    # Compute H (same logic as fusion.py)                                                                    ← 这行是什么?
     keys = ["x", "y", "z"]
     ca_corr = ca.copy()
     eps = 1e-3
@@ -601,7 +608,12 @@ def plot_alpha_correct_vs_unc(stats: StatsAccumulator, split: str, out_dir: str 
                 m_p = (cv >= plo) & (cv < phi)
                 mc = m_t & m_p
                 if mc.sum() < 5: continue
-                ma = alpha_v[mc].mean()
+                a = alpha_v[mc]
+                if mc.sum() >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    ma = a[(a >= lo_a) & (a <= hi_a)].mean()
+                else:
+                    ma = a.mean()
                 m_full = (ts >= tlo) & (ts < thi) & (cj_vals >= plo) & (cj_vals < phi)
                 ca_corr[m_full, axis_idx] = cj_vals[m_full] + ma * cj_vals[m_full] * ts[m_full]
 
@@ -659,6 +671,7 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     n_ts_bins = gr.get("n_total_std_bins", 10)
+    trim_pct = gr.get("trim_pct", 0.1)
     view = cfg.get("view_3d", {"elev": 25, "azim": -45})
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
@@ -702,7 +715,11 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
                     continue
                 xs.append(float(cv[m].mean()))
                 ys.append(ts_fixed_y)
-                zs.append(float(alpha_v[m].mean()))
+                a = alpha_v[m]
+                if m.sum() >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    a = a[(a >= lo_a) & (a <= hi_a)]
+                zs.append(float(a.mean()))
 
             ax.plot(xs, ys, zs, "o-", color=colors[tpi], markersize=3, linewidth=1.2,
                     label=f"std≈{tsm:.2e}")

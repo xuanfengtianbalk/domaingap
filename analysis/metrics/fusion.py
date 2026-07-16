@@ -42,7 +42,12 @@ def _alpha_joint_correct(coord_a, gt, total_std, gt_ranges, step) -> np.ndarray:
                 m = m_t & m_p
                 if m.sum() < 5:
                     continue
-                ma = alpha_v[m].mean()
+                a = alpha_v[m]
+                if m.sum() >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    ma = a[(a >= lo_a) & (a <= hi_a)].mean()
+                else:
+                    ma = a.mean()
                 # apply correction to ALL pixels in this cell
                 # (including those with |pred|<eps — they keep original value)
                 m_full = (ts >= tlo) & (ts < thi) & (ca >= plo) & (ca < phi)
@@ -157,6 +162,7 @@ def compute(stats: StatsAccumulator) -> dict:
         cfg = yaml.safe_load(f)
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
+    trim_pct = gr.get("trim_pct", 0.1)
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)

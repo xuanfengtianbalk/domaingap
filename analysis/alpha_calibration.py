@@ -30,7 +30,7 @@ from math_.q_ import quatProduct  # noqa: F401
 
 def sample_epsilon():
     """Return default epsilon values for FGSM attack."""
-    return [0.01, 0.05, 0.1, 1, 2]
+    return [0.1, 1, 1.5, 1.6]
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -227,6 +227,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         cfg = _yaml.safe_load(f)
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
+    trim_pct = gr.get("trim_pct", 0.1)
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -386,11 +387,16 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 if m.sum() < 5:
                     continue
                 a = alpha_v[m]
+                if m.sum() >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    a_ma = a[(a >= lo_a) & (a <= hi_a)]
+                else:
+                    a_ma = a
                 grid.append({
                     "total_std_bin": i,  "total_std_lo": float(tlo),  "total_std_hi": float(thi),
                     "pred_bin":      j,  "pred_lo":      float(plo),  "pred_hi":      float(phi),
                     "n": int(m.sum()),
-                    "mean_alpha": float(a.mean()), "std_alpha": float(a.std()),
+                    "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
                     "mean_GT": float(gv[m].mean()),
                     "mean_pred": float(pv[m].mean()),
                     "mean_total_std": float(tv[m].mean()),
@@ -467,6 +473,185 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     _plot_calibration_curve(calibration, curve_path)
     print(f"  → {curve_path}")
 
+    # ── supplementary analyses ──
+    c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in alpha_preds[ax::3]]) for ax in range(3)]
+    c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in alpha_gts[ax::3]])   for ax in range(3)]
+    c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in alpha_ts[ax::3]])    for ax in range(3)]
+
+    # clean
+    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins, trim_pct)
+    _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins,
+                                   os.path.join(out_dir, "alpha_correct_vs_unc.png"))
+    _plot_ct_vs_uncertainty_for(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins,
+                                os.path.join(out_dir, "ct_vs_uncertainty.png"))
+    _plot_gt_conditioned_for(c_pred_ax, c_gt_ax,
+                             os.path.join(out_dir, "gt_conditioned.png"))
+
+    # per epsilon
+    for eps in epsilons:
+        k = str(eps)
+        if calib_counts[k][0] == 0:
+            continue
+        e_pred_ax = [np.concatenate([np.atleast_1d(x) for x in calib_preds[k][ax]]) for ax in range(3)]
+        e_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]])   for ax in range(3)]
+        e_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]])    for ax in range(3)]
+        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, n_ts_bins, trim_pct)
+        tag = f"eps_{k}"
+        _plot_alpha_correct_vs_unc_for(e_pred_ax, e_gt_ax, e_ts_ax, tbl_e, n_ts_bins,
+                                       os.path.join(out_dir, f"alpha_correct_vs_unc_{tag}.png"))
+        _plot_ct_vs_uncertainty_for(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, n_ts_bins,
+                                    os.path.join(out_dir, f"ct_vs_uncertainty_{tag}.png"))
+        _plot_gt_conditioned_for(e_pred_ax, e_gt_ax,
+                                 os.path.join(out_dir, f"gt_conditioned_{tag}.png"))
+
+
+# ── supplementary analyses (shared across clean + per-ε) ─────────────────────
+
+def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, n_ts_bins, trim_pct):
+    """Build per-axis alpha table from (pred, gt, ts) arrays. Returns {ax: lookup_dict}."""
+    alpha_tbl = {}
+    for ax_idx, key in enumerate(["x", "y", "z"]):
+        p = pred_by_ax[ax_idx]
+        g = gt_by_ax[ax_idx]
+        t = ts_by_ax[ax_idx]
+        valid = np.abs(p) >= 1e-3
+        if valid.sum() < 10:
+            alpha_tbl[key] = {"edges_ts": [], "edges_pred": [], "grid": {}}
+            continue
+        pv, gv, tv = p[valid], g[valid], t[valid]
+        alpha_v = (gv - pv) / (pv * tv + 1e-12)
+        ts_edges = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
+        gr_ax = gr[key]
+        inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+
+        grid = {}
+        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+            m_t = (tv >= tlo) & (tv < thi)
+            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                m = m_t & (pv >= plo) & (pv < phi)
+                n = m.sum()
+                if n < 5:
+                    continue
+                a = alpha_v[m]
+                if n >= 10:
+                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                    a = a[(a >= lo_a) & (a <= hi_a)]
+                grid[(i, j)] = float(a.mean())
+        alpha_tbl[key] = {"edges_ts": ts_edges, "edges_pred": p_edges, "grid": grid}
+    return alpha_tbl
+
+
+def _correct_with_alpha(pred_by_ax, ts_by_ax, alpha_tbl):
+    """Apply alpha lookup correction per axis. Returns corrected [3][N] arrays."""
+    corrected = [p.copy() for p in pred_by_ax]
+    for ax_idx, key in enumerate(["x", "y", "z"]):
+        tbl = alpha_tbl[key]
+        if len(tbl["edges_ts"]) == 0 or len(tbl["edges_pred"]) == 0:
+            continue
+        p = pred_by_ax[ax_idx]
+        t = ts_by_ax[ax_idx]
+        ts_edges = tbl["edges_ts"]
+        p_edges = tbl["edges_pred"]
+        grid = tbl["grid"]
+        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                ma = grid.get((i, j))
+                if ma is None:
+                    continue
+                m = (t >= tlo) & (t < thi) & (p >= plo) & (p < phi)
+                corrected[ax_idx][m] = p[m] + ma * p[m] * t[m]
+    return corrected
+
+
+def _plot_alpha_correct_vs_unc_for(pred_by_ax, gt_by_ax, ts_by_ax, alpha_tbl, n_ts_bins, save_path_base, tag=""):
+    """DER vs H MAE per total_std bin (percentile + value panels)."""
+    ts_edges = np.percentile(np.concatenate(ts_by_ax), np.linspace(0, 100, n_ts_bins + 1))
+    pct_c = [(i + 0.5) * (100.0 / n_ts_bins) for i in range(n_ts_bins)]
+    corrected = _correct_with_alpha(pred_by_ax, ts_by_ax, alpha_tbl)
+
+    der_mae, h_mae, ts_val = [], [], []
+    for lo, hi in zip(ts_edges[:-1], ts_edges[1:]):
+        m = np.zeros_like(ts_by_ax[0], dtype=bool)
+        for ax in range(3):
+            m |= (ts_by_ax[ax] >= lo) & (ts_by_ax[ax] < hi)
+        if m.sum() < 10:
+            continue
+        der_err = np.sqrt((corrected[0][m]-gt_by_ax[0][m])**2 + (corrected[0][m]-gt_by_ax[0][m])**2)  # placeholder
+        der_all = np.sqrt(((pred_by_ax[0][m]-gt_by_ax[0][m])**2).astype(float) + 
+                          ((pred_by_ax[1][m]-gt_by_ax[1][m])**2).astype(float) +
+                          ((pred_by_ax[2][m]-gt_by_ax[2][m])**2).astype(float))
+        h_all = np.sqrt(((corrected[0][m]-gt_by_ax[0][m])**2).astype(float) +
+                        ((corrected[1][m]-gt_by_ax[1][m])**2).astype(float) +
+                        ((corrected[2][m]-gt_by_ax[2][m])**2).astype(float))
+        ts_val.append(float(np.concatenate([ts_by_ax[a][m] for a in range(3)]).mean()))
+        der_mae.append(float(der_all.mean()))
+        h_mae.append(float(h_all.mean()))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2))
+    ax1.plot(pct_c, der_mae, "bo-", markersize=5, label="DER")
+    ax1.plot(pct_c, h_mae,  "mo-", markersize=5, label="H (alpha-correct)")
+    ax1.set_xlabel("total_std percentile"); ax1.set_ylabel("MAE"); ax1.legend(); ax1.grid(True, alpha=0.2); ax1.set_xlim(0,100)
+    ax2.plot(ts_val, der_mae, "bo-", markersize=5, label="DER")
+    ax2.plot(ts_val, h_mae,  "mo-", markersize=5, label="H (alpha-correct)")
+    ax2.set_xlabel("mean total_std"); ax2.set_ylabel("MAE"); ax2.set_xscale("log"); ax2.legend(); ax2.grid(True, alpha=0.2)
+    fig.suptitle(f"alpha-correct vs uncertainty {tag}")
+    plt.tight_layout()
+    plt.savefig(save_path_base + ("_" + tag if tag else "") + ".png" if "png" not in save_path_base else save_path_base, dpi=200)
+    plt.close()
+
+
+def _plot_ct_vs_uncertainty_for(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, n_ts_bins, save_path):
+    """Per GT bin: total_std vs bias curves."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
+    for ax_i, (ax, key) in enumerate(zip(axes, ["x", "y", "z"])):
+        p, g, t = pred_by_ax[ax_i], gt_by_ax[ax_i], ts_by_ax[ax_i]
+        gr_ax = gr[key]
+        gt_edges = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+        n_gt = len(gt_edges) - 1
+        picks = [0, n_gt//4, n_gt//2, 3*n_gt//4, n_gt-1] if n_gt > 1 else [0]
+        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(picks)))
+        for pi, gi in enumerate(picks):
+            if gi >= n_gt: continue
+            lo, hi = gt_edges[gi], gt_edges[gi+1]
+            mg = (g >= lo) & (g < hi)
+            if mg.sum() < 30: continue
+            tg, pg, gg = t[mg], p[mg], g[mg]
+            ts_edges = np.percentile(tg, np.linspace(0, 100, n_ts_bins+1))
+            xs, ys = [], []
+            for tlo, thi in zip(ts_edges[:-1], ts_edges[1:]):
+                mc = (tg >= tlo) & (tg < thi)
+                if mc.sum() < 5: continue
+                xs.append(float(tg[mc].mean()))
+                ys.append(float((pg[mc] - gg[mc]).mean()))
+            gt_mid = float(gg.mean())
+            ax.plot(xs, ys, "o-", color=colors[pi], markersize=3, linewidth=1, label=f"GT≈{gt_mid:+.2f}")
+        ax.axhline(0, color="gray", linestyle=":", alpha=0.4)
+        ax.set_title(f"GT_{key}"); ax.set_xscale("log"); ax.legend(fontsize=6); ax.grid(True, alpha=0.15)
+    fig.suptitle("ct vs uncertainty")
+    plt.tight_layout(); plt.savefig(save_path, dpi=200); plt.close()
+
+
+def _plot_gt_conditioned_for(pred_by_ax, gt_by_ax, save_path):
+    """Mean pred + p25-p75 vs GT, 3 panels with identity line."""
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    for ax_i, (ax, name) in enumerate(zip(axes, ["x", "y", "z"])):
+        g = gt_by_ax[ax_i]; p = pred_by_ax[ax_i]
+        gt_edges = np.percentile(g, np.linspace(0, 100, 21))
+        gtm, ma, p25, p75 = [], [], [], []
+        for lo, hi in zip(gt_edges[:-1], gt_edges[1:]):
+            m = (g >= lo) & (g < hi)
+            if m.sum() < 3: continue
+            gtm.append(float(g[m].mean()))
+            ma.append(float(p[m].mean())); p25.append(float(np.percentile(p[m],25))); p75.append(float(np.percentile(p[m],75)))
+        ax.fill_between(gtm, p25, p75, color="#1f77b4", alpha=0.12)
+        ax.plot(gtm, ma, "o-", color="#1f77b4", markersize=3, label="DER")
+        mx = max(abs(np.array(gtm).min()), abs(np.array(gtm).max())) * 1.1
+        ax.plot([-mx, mx], [-mx, mx], "gray", linestyle=":", alpha=0.5)
+        ax.set_title(f"GT_{name}"); ax.legend(fontsize=7); ax.grid(True, alpha=0.2)
+    fig.suptitle("prediction vs GT")
+    plt.tight_layout(); plt.savefig(save_path, dpi=200); plt.close()
+
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -481,7 +666,7 @@ if __name__ == "__main__":
                         default=None, help="FGSM epsilon values")
     parser.add_argument("--n_ts_bins", type=int, default=10,
                         help="Number of total_std percentile bins")
-    parser.add_argument("--max_samples", type=int, default=100,
+    parser.add_argument("--max_samples", type=int, default=1000,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()

@@ -161,7 +161,7 @@ def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, gt_rang
     }
 
 
-def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_idx: int, n_ts_bins: int = 10) -> dict:
+def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_idx: int, n_ts_bins: int = 10, trim_pct: float = 0.1) -> dict:
     """2D bin: total_std (rows, n_ts_bins bins) × pred (cols, config range + overflow edges)."""
     ca = coord_a[:, axis_idx]
     gt_axis = gt[:, axis_idx]
@@ -185,14 +185,20 @@ def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_i
             if n < 5:
                 continue
             a = alpha_v[m]
+            if n >= 10:
+                lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                a_trim = a[(a >= lo_a) & (a <= hi_a)]
+            else:
+                a_trim = a
             grid.append({
-                "total_std_bin": i,   "total_std_lo": float(tlo),   "total_std_hi": float(thi),
-                "pred_bin":      j,   "pred_lo":      float(plo),   "pred_hi":      float(phi),
-                "n":             int(n),
-                "mean_alpha":    float(a.mean()),    "std_alpha":    float(a.std()),
-                "mean_GT":       float(gt_v[m].mean()),
-                "mean_pred":     float(ca_v[m].mean()),
+                "total_std_bin": i,  "total_std_lo": float(tlo),  "total_std_hi": float(thi),
+                "pred_bin":      j,  "pred_lo":      float(plo),  "pred_hi":      float(phi),
+                "n": int(n),
+                "mean_alpha": float(a_trim.mean()), "std_alpha": float(a.std()),
+                "mean_GT": float(gt_v[m].mean()),
+                "mean_pred": float(ca_v[m].mean()),
                 "mean_total_std": float(ts_v[m].mean()),
+                "axis": ["x", "y", "z"][axis_idx],
             })
 
     return {"grid": grid, "total_std_edges": [float(e) for e in ts_edges], "pred_edges": [float(e) for e in p_edges]}
@@ -209,6 +215,7 @@ def compute(stats: StatsAccumulator) -> dict:
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     n_ts_bins = gr.get("n_total_std_bins", 10)
+    trim_pct = gr.get("trim_pct", 0.1)
 
     epi = stats.epi_var_A.flatten()
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
@@ -227,9 +234,9 @@ def compute(stats: StatsAccumulator) -> dict:
         "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["y"], step, 1),
         "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["z"], step, 2),
         "alpha_joint": {
-            "x": _alpha_joint_profile(ca, cb, gt, total_std, gr["x"], step, 0, n_ts_bins),
-            "y": _alpha_joint_profile(ca, cb, gt, total_std, gr["y"], step, 1, n_ts_bins),
-            "z": _alpha_joint_profile(ca, cb, gt, total_std, gr["z"], step, 2, n_ts_bins),
+            "x": _alpha_joint_profile(ca, cb, gt, total_std, gr["x"], step, 0, n_ts_bins, trim_pct),
+            "y": _alpha_joint_profile(ca, cb, gt, total_std, gr["y"], step, 1, n_ts_bins, trim_pct),
+            "z": _alpha_joint_profile(ca, cb, gt, total_std, gr["z"], step, 2, n_ts_bins, trim_pct),
         },
     }
 
