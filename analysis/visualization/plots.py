@@ -687,11 +687,13 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
 
         ax = fig.add_subplot(1, 3, pi + 1, projection="3d")
         # Pick ~5 representative total_std bins
-        pick_ts = [0, n_ts_bins // 4, n_ts_bins // 2, 3 * n_ts_bins // 4, n_ts_bins - 1]
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(pick_ts)))
+        pick_ts = list(range(n_ts_bins))
+        colors = plt.cm.viridis(np.linspace(0.1, 0.9, n_ts_bins))
 
         for tpi, ti in enumerate(pick_ts):
             tlo, thi = ts_edges[ti], ts_edges[ti + 1]
+            tsm = float(tv[(tv >= tlo) & (tv < thi)].mean())
+            ts_fixed_y = float(np.log10(tsm + 1e-12))
             xs, ys, zs = [], [], []
             for pj in range(n_pred):
                 plo, phi = p_edges[pj], p_edges[pj + 1]
@@ -699,10 +701,9 @@ def plot_alpha_joint_3d(stats: StatsAccumulator, split: str, out_dir: str | None
                 if m.sum() < 5:
                     continue
                 xs.append(float(cv[m].mean()))
-                ys.append(float(np.log10(tv[m].mean() + 1e-12)))
+                ys.append(ts_fixed_y)
                 zs.append(float(alpha_v[m].mean()))
 
-            tsm = float(tv[(tv >= tlo) & (tv < thi)].mean())
             ax.plot(xs, ys, zs, "o-", color=colors[tpi], markersize=3, linewidth=1.2,
                     label=f"std≈{tsm:.2e}")
 
