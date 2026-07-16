@@ -11,6 +11,10 @@ import sys, os, json, csv, yaml, math, argparse, numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from scipy.stats import norm, beta
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
@@ -26,7 +30,7 @@ from math_.q_ import quatProduct  # noqa: F401
 
 def sample_epsilon():
     """Return default epsilon values for FGSM attack."""
-    return [0.001, 0.005, 0.01, 0.05, 0.1]
+    return [0.01, 0.05, 0.1, 1, 2]
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -74,7 +78,7 @@ def fgsm_attack(model, image: torch.Tensor, coors_gt: torch.Tensor,
     loss.backward()
 
     adv = X + epsilon * X.grad.sign()
-    adv = torch.clamp(adv, 0.0, 1.0)
+    # adv = torch.clamp(adv, 0.0, 1.0)
     return adv.detach()
 
 
@@ -91,7 +95,7 @@ def compute_pose_one(outputs_raw: dict, gtbbox: torch.Tensor, K: np.ndarray,
     n_valid = (~np.isnan(coormap_np[:, :, 0])).sum()
     gtb = gtbbox.cpu().detach().numpy()
     try:
-        is_true, qvecs, tvecs = pose_calculats_from_coors(K, coormap_np, gtb)
+        is_true, qvecs, tvecs = pose_calculats_from_coors(K, coormap_np, gtb[0])
     except Exception:
         is_true, qvecs, tvecs = False, None, None
     qg = qgt.squeeze().cpu()
@@ -126,6 +130,86 @@ def _total_std_from_full(full: dict) -> np.ndarray:
     elif epi is not None:
         return np.sqrt(np.maximum(epi, 0.0))
     return None
+
+
+def compute_calibration_torch(pre, gt, pre_delta, conf=10, alpha_ci=0.05, return_errors=True):
+    """Reliability calibration: alpha vs actual coverage.
+
+    pre:        Tensor [N], model predictions
+    gt:         Tensor [N], ground truth
+    pre_delta:  Tensor [N], model total_std
+    conf:       int, number of confidence levels (default 10 → 0.1 ~ 1.0)
+    alpha_ci:   float, Clopper-Pearson CI alpha (default 0.05 → 95%)
+    return_errors: bool, return MAE / RMSCE / MCE
+
+    Returns: alphas, coverages, ci_lower, ci_upper, [calib_errors]
+    """
+    alphas = torch.linspace(0, 1.0, conf + 1)
+    coverages = []
+    ci_lower = []
+    ci_upper = []
+
+    N = pre.shape[0]
+    pre = pre.detach().cpu().numpy()
+    gt = gt.detach().cpu().numpy()
+    pre_delta = pre_delta.detach().cpu().numpy()
+
+    for alpha in alphas:
+        z = norm.ppf(0.5 + float(alpha) / 2)
+        lower = pre - z * pre_delta
+        upper = pre + z * pre_delta
+        covers = (gt >= lower) & (gt <= upper)
+        count = int(covers.sum())
+        coverage = count / N
+        coverages.append(coverage)
+        ci_l = beta.ppf(alpha_ci / 2, count, N - count + 1) if count > 0 else 0.0
+        ci_u = beta.ppf(1 - alpha_ci / 2, count + 1, N - count) if count < N else 1.0
+        ci_lower.append(ci_l)
+        ci_upper.append(ci_u)
+
+    alphas = torch.tensor([float(a) for a in alphas])
+    coverages = torch.tensor(coverages)
+    ci_lower = torch.tensor(ci_lower)
+    ci_upper = torch.tensor(ci_upper)
+
+    calib_errors = {}
+    if return_errors:
+        diff = coverages - alphas
+        calib_errors["MAE"] = torch.mean(torch.abs(diff)).item()
+        calib_errors["RMSCE"] = torch.sqrt(torch.mean(diff ** 2)).item()
+        calib_errors["MCE"] = torch.max(torch.abs(diff)).item()
+
+    if return_errors:
+        return alphas, coverages, ci_lower, ci_upper, calib_errors
+    else:
+        return alphas, coverages, ci_lower, ci_upper
+
+
+def _plot_calibration_curve(calibration: dict, save_path: str):
+    """Reliability diagram: alpha vs coverage, 3 axes (x/y/z)."""
+    fig, ax = plt.subplots(figsize=(6, 5))
+    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
+    for key in ["x", "y", "z"]:
+        c = calibration[key]
+        alphas = np.array(c["alphas"])
+        coverages = np.array(c["coverages"])
+        ci_lo = np.array(c["ci_lower"])
+        ci_hi = np.array(c["ci_upper"])
+        errs = c["errors"]
+        label = f"{key} (MAE={errs['MAE']:.3f})"
+        ax.fill_between(alphas, ci_lo, ci_hi, color=colors[key], alpha=0.1)
+        ax.plot(alphas, coverages, "o-", color=colors[key], markersize=4, linewidth=1.2, label=label)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.3, label="perfect")
+    ax.set_xlabel("Confidence level (alpha)")
+    ax.set_ylabel("Actual coverage")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.2)
+    ax.set_title("Reliability Calibration Curve")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
 
 
 # ── main calibration ─────────────────────────────────────────────────────────
@@ -285,6 +369,20 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             "pred_edges": [float(e) for e in p_edges],
         }
 
+    # --- calibration reliability (alpha vs coverage) ---
+    calibration = {}
+    for ax_idx, key in enumerate(["x", "y", "z"]):
+        p = alpha_preds[ax_idx::3]
+        g = alpha_gts[ax_idx::3]
+        d = alpha_ts[ax_idx::3]
+        al, co, cl, cu, errs = compute_calibration_torch(
+            torch.tensor(p), torch.tensor(g), torch.tensor(d), conf=10)
+        calibration[key] = {
+            "alphas": al.tolist(), "coverages": co.tolist(),
+            "ci_lower": cl.tolist(), "ci_upper": cu.tolist(),
+            "errors": errs,
+        }
+
     # --- write outputs ---
     out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
     os.makedirs(out_dir, exist_ok=True)
@@ -299,6 +397,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         },
         "robustness": robustness,
         "alpha_table": alpha_table,
+        "calibration": calibration,
     }
 
     json_path = os.path.join(out_dir, "alpha_cali.json")
@@ -319,6 +418,14 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             w.writerows(csv_rows)
         print(f"  → {csv_path}")
 
+    # calibration curve
+    curve_path = os.path.join(out_dir, "calibration_curve.png")
+    _plot_calibration_curve(calibration, curve_path)
+    print(f"  → {curve_path}")
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -330,7 +437,7 @@ if __name__ == "__main__":
                         default=None, help="FGSM epsilon values")
     parser.add_argument("--n_ts_bins", type=int, default=10,
                         help="Number of total_std percentile bins")
-    parser.add_argument("--max_samples", type=int, default=1000,
+    parser.add_argument("--max_samples", type=int, default=100,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
