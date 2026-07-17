@@ -145,7 +145,7 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 # ── main eval ────────────────────────────────────────────────────────────────
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
-             std_threshold: float, device: str = "cuda:0"):
+             std_threshold: float, device: str = "cuda:0", uuid: str | None = None):
     """Run alpha-corrected PnP evaluation on each split."""
 
     import yaml as _yaml
@@ -159,7 +159,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
     out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
     os.makedirs(out_dir, exist_ok=True)
 
-    uuid = cfg["pairwise"]["uuid_1"]
+    if uuid is None:
+        uuid = cfg["pairwise"]["uuid_1"]
     from analysis_utils import get_model_type_from_traininfo
     mt, bb = get_model_type_from_traininfo(uuid)
     model_type = mt[0]
@@ -247,6 +248,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Alpha-corrected PnP evaluation on sunlamp/lightbox")
+    parser.add_argument("--uuid", default=None,
+                        help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
     parser.add_argument("--max_samples", type=int, default=None)
@@ -254,4 +257,6 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_threshold, args.device)
+    uuid = args.uuid or cfg["pairwise"]["uuid_1"]
+
+    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_threshold, args.device, uuid)
