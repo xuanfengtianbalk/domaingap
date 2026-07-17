@@ -218,7 +218,7 @@ def _plot_calibration_curve(calibration: dict, save_path: str):
 # ── main calibration ─────────────────────────────────────────────────────────
 
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
-              max_samples: int = 1000, device: str = "cuda:0"):
+              max_samples: int = 1000, std_bins: list = None, device: str = "cuda:0"):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -228,6 +228,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     trim_pct = gr.get("trim_pct", 0.1)
+    if std_bins is None:
+        std_bins = [0.01, 0.05, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0, 5.0]
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -243,10 +245,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # Accumulators
     angle_list = {str(e): [] for e in epsilons}
     dist_list  = {str(e): [] for e in epsilons}
-    ts_clean_list = {str(e): [] for e in epsilons}
     ts_adv_list   = {str(e): [] for e in epsilons}
-
-    alpha_preds, alpha_ts, alpha_gts = [], [], []      # per-pixel for alpha table
 
     # Per-epsilon calibration accumulators (sampled, max ~200k/axis/epsilon)
     MAX_CALIB_PIX = 200_000
@@ -260,28 +259,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         image = samples.to(device)                                  # (1, 3, H, W)
         mask_gt = targets["mask_gt"][0]                             # (H, W)
         coors_gt = targets["coors_gt"]                              # (1, 3, H, W)
-
-        # --- clean forward ---
-        with torch.no_grad(), torch.amp.autocast("cuda"):
-            outputs_raw_clean = model(image)
-        full_clean = _extract_from_raw(outputs_raw_clean, model_type)
-        total_std_clean = _total_std_from_full(full_clean)
-        pred_clean = full_clean["coords"][0].numpy()                # (3, H, W)
-
-        # --- collect alpha pixels (clean data) ---
         m_valid = (mask_gt > 0.5).numpy()
-        if m_valid.sum() > 0 and total_std_clean is not None:
-            ts_arr = total_std_clean.squeeze(0)
-            if ts_arr.ndim == 3:
-                ts_pix = ts_arr[:, m_valid]
-            else:
-                ts_pix = np.broadcast_to(ts_arr[m_valid][np.newaxis, :], (3, m_valid.sum()))
-            for ax in range(3):
-                p = pred_clean[ax, m_valid]
-                g = coors_gt[0, ax, m_valid].numpy()
-                alpha_preds.append(p)
-                alpha_ts.append(ts_pix[ax])
-                alpha_gts.append(g)
 
         # --- FGSM loop ---
         for eps in epsilons:
@@ -325,14 +303,27 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             if not math.isnan(angle):
                 angle_list[k].append(angle)
                 dist_list[k].append(dist)
-            if total_std_clean is not None:
-                ts_clean_list[k].append(float(np.nanmean(total_std_clean)))
             if total_std_adv is not None:
                 ts_adv_list[k].append(float(np.nanmean(total_std_adv)))
 
         n_images += 1
 
-    print(f"\nProcessed {n_images} images, {len(alpha_preds)} alpha pixels")
+    # --- merge attacked data across epsilons for alpha table ---
+    merged_p, merged_g, merged_t = [], [], []
+    for ax in range(3):
+        mp, mg, mt = [], [], []
+        for eps in epsilons:
+            k = str(eps)
+            if calib_preds[k][ax]:
+                mp.extend(calib_preds[k][ax])
+                mg.extend(calib_gts[k][ax])
+                mt.extend(calib_ts[k][ax])
+        merged_p.append(mp)
+        merged_g.append(mg)
+        merged_t.append(mt)
+
+    n_alpha = sum(len(x) for x in merged_p[0])
+    print(f"\nProcessed {n_images} images, merged alpha pixels: {n_alpha} per axis")
 
     # --- robustness stats ---
     robustness = {}
@@ -344,43 +335,36 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             rob["angle_std"]  = float(np.std(angle_list[k]))
             rob["dist_mean"]  = float(np.mean(dist_list[k]))
             rob["dist_std"]   = float(np.std(dist_list[k]))
-        if ts_clean_list[k]:
-            rob["ts_clean_mean"] = float(np.mean(ts_clean_list[k]))
         if ts_adv_list[k]:
             rob["ts_adv_mean"] = float(np.mean(ts_adv_list[k]))
         robustness[k] = rob
 
-    # --- build 2D alpha table per axis ---
-    alpha_preds = np.concatenate(alpha_preds).ravel()
-    alpha_ts    = np.concatenate(alpha_ts).ravel()
-    alpha_gts   = np.concatenate(alpha_gts).ravel()
-    n_total = len(alpha_preds)
-    n_per_ax = n_total // 3
-    print(f"  table pixels: {n_total} ({n_per_ax} per axis)")
+    # --- build 2D alpha table per axis (merged attacked data, fixed std edges) ---
+    ts_edges = np.array([0.0] + list(std_bins) + [np.inf])
+    n_ts_bins_eff = len(ts_edges) - 1
 
     alpha_table = {}
     for ax_idx, key in enumerate(["x", "y", "z"]):
-        pred_vals = alpha_preds[ax_idx::3] if len(alpha_preds) % 3 == 0 else alpha_preds
-        ts_vals   = alpha_ts[ax_idx::3] if len(alpha_ts) % 3 == 0 else alpha_ts
-        gt_vals   = alpha_gts[ax_idx::3] if len(alpha_gts) % 3 == 0 else alpha_gts
+        mp = np.concatenate([np.atleast_1d(x) for x in merged_p[ax_idx]])
+        mg = np.concatenate([np.atleast_1d(x) for x in merged_g[ax_idx]])
+        mt = np.concatenate([np.atleast_1d(x) for x in merged_t[ax_idx]])
 
         eps_ = 1e-3
-        valid = np.abs(pred_vals) >= eps_
+        valid = np.abs(mp) >= eps_
         if valid.sum() < 10:
             alpha_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
             continue
 
-        pv, gv, tv = pred_vals[valid], gt_vals[valid], ts_vals[valid]
+        pv, gv, tv = mp[valid], mg[valid], mt[valid]
         alpha_v = (gv - pv) / (pv * tv + 1e-12)
 
-        ts_edges = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
         gr_ax = gr[key]
         inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
         p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         grid = []
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-            m_t = (tv >= tlo) & (tv < thi)
+            m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
             for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
                 m_p = (pv >= plo) & (pv < phi)
                 m = m_t & m_p
@@ -408,6 +392,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             "total_std_edges": [float(e) for e in ts_edges],
             "pred_edges": [float(e) for e in p_edges],
         }
+
+    n_total = sum(len(mp) for mp in merged_p[0:1])
+    print(f"  table: {sum(len(t['grid']) for t in alpha_table.values())} cells, {n_total} pixels/axis")
 
     # --- calibration reliability (alpha vs coverage per epsilon) ---
     calibration = {}
@@ -442,8 +429,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             "uuid":             uuid,
             "epsilons":         epsilons,
             "n_images":         n_images,
-            "n_alpha_pixels":   int(len(alpha_preds)),
-            "n_total_std_bins": n_ts_bins,
+            "n_alpha_pixels":   n_total,
+            "n_total_std_bins": n_ts_bins_eff,
         },
         "robustness": robustness,
         "alpha_table": alpha_table,
@@ -473,14 +460,14 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     _plot_calibration_curve(calibration, curve_path)
     print(f"  → {curve_path}")
 
-    # ── supplementary analyses ──
-    c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in alpha_preds[ax::3]]) for ax in range(3)]
-    c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in alpha_gts[ax::3]])   for ax in range(3)]
-    c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in alpha_ts[ax::3]])    for ax in range(3)]
+    # ── supplementary analyses (use merged attacked data) ──
+    c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
+    c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
+    c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
 
     # clean
-    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins, trim_pct)
-    _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins,
+    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct)
+    _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins_eff,
                                    os.path.join(out_dir, "alpha_correct_vs_unc.png"))
     _plot_ct_vs_uncertainty_for(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins,
                                 os.path.join(out_dir, "ct_vs_uncertainty.png"))
@@ -495,7 +482,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         e_pred_ax = [np.concatenate([np.atleast_1d(x) for x in calib_preds[k][ax]]) for ax in range(3)]
         e_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]])   for ax in range(3)]
         e_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]])    for ax in range(3)]
-        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, n_ts_bins, trim_pct)
+        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, std_bins, trim_pct)
         tag = f"eps_{k}"
         _plot_alpha_correct_vs_unc_for(e_pred_ax, e_gt_ax, e_ts_ax, tbl_e, n_ts_bins,
                                        os.path.join(out_dir, f"alpha_correct_vs_unc_{tag}.png"))
@@ -507,8 +494,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
 # ── supplementary analyses (shared across clean + per-ε) ─────────────────────
 
-def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, n_ts_bins, trim_pct):
+def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, trim_pct):
     """Build per-axis alpha table from (pred, gt, ts) arrays. Returns {ax: lookup_dict}."""
+    ts_edges = np.array([0.0] + list(std_bins) + [np.inf])
     alpha_tbl = {}
     for ax_idx, key in enumerate(["x", "y", "z"]):
         p = pred_by_ax[ax_idx]
@@ -520,7 +508,6 @@ def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, n_ts_bins,
             continue
         pv, gv, tv = p[valid], g[valid], t[valid]
         alpha_v = (gv - pv) / (pv * tv + 1e-12)
-        ts_edges = np.percentile(tv, np.linspace(0, 100, n_ts_bins + 1))
         gr_ax = gr[key]
         inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
         p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
@@ -664,7 +651,9 @@ if __name__ == "__main__":
     parser.add_argument("--epsilons", nargs="*", type=float,
                         default=None, help="FGSM epsilon values")
     parser.add_argument("--n_ts_bins", type=int, default=10,
-                        help="Number of total_std percentile bins")
+                        help="Number of total_std percentile bins (for plots only)")
+    parser.add_argument("--std_bins", nargs="*", type=float,
+                        default=None, help="Fixed total_std edges for alpha table")
     parser.add_argument("--max_samples", type=int, default=10000,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
@@ -672,4 +661,4 @@ if __name__ == "__main__":
 
     epsilons = args.epsilons if args.epsilons else sample_epsilon()
     print(f"Epsilons: {epsilons}")
-    calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.device)
+    calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device)
