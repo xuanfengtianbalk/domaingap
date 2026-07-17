@@ -257,6 +257,4 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    uuid = args.uuid or cfg["pairwise"]["uuid_1"]
-
-    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_threshold, args.device, uuid)
+    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_threshold, args.device, args.uuid)
