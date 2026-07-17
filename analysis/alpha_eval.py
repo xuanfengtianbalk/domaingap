@@ -58,17 +58,11 @@ def load_alpha_table(csv_path: str) -> dict:
 # ── coordinate correction ────────────────────────────────────────────────────
 
 def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.Tensor,
-                   logb: torch.Tensor, alpha_table: dict, std_threshold: float) -> torch.Tensor:
-    """Apply per-axis alpha correction. Returns (1, 3, H, W) corrected coords.
+                   logb: torch.Tensor, alpha_table: dict, std_min: float, std_max: float) -> tuple:
+    """Apply per-axis alpha correction. Returns (coords_corrected, nan_mask).
 
-    Args:
-        coords_tensor: (1, 3, H, W) DER coordinate map
-        logl, loga, logb: DER NIG params for total_std computation
-        alpha_table: from load_alpha_table()
-        std_threshold: per-axis max total_std (pixels with any axis > thr are skipped)
-
-    Returns:
-        coords_corrected: (1, 3, H, W), unchanged for skipped pixels
+    Pixels with any per-axis total_std outside [std_min, std_max] are set to NaN.
+    Returns the NaN mask so caller can apply to original coords for fair comparison.
     """
     import numpy as np
 
@@ -86,11 +80,13 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
     alea_var = b / (a - 1 + 1e-12)
     total_std = np.sqrt(np.maximum(epi_var + alea_var, 0.0))  # (3, H, W)
 
+    # pixels where any axis std is outside [min, max] → NaN
     keep = np.ones((H, W), dtype=bool)
     for ax in range(3):
-        keep &= (total_std[ax] < std_threshold)
+        keep &= (total_std[ax] >= std_min) & (total_std[ax] <= std_max)
 
     coords_np = coords.squeeze(0).cpu().numpy()  # (3, H, W)
+    coords_np[:, ~keep] = float("nan")
 
     for ax_idx, key in enumerate(["x", "y", "z"]):
         tbl = alpha_table[key]
@@ -100,7 +96,7 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
         if len(ts_edges) == 0 or len(p_edges) == 0:
             continue
 
-        ts_ax = total_std[ax_idx]  # (H, W)
+        ts_ax = total_std[ax_idx]
         pr_ax = coords_np[ax_idx]
 
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
@@ -114,7 +110,7 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
                 coords_np[ax_idx, mask] = pr_ax[mask] + ma * pr_ax[mask] * ts_ax[mask]
 
     result = torch.from_numpy(coords_np).unsqueeze(0).to(device).to(coords.dtype)
-    return result
+    return result, ~keep
 
 
 # ── PnP wrapper ──────────────────────────────────────────────────────────────
@@ -145,7 +141,7 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 # ── main eval ────────────────────────────────────────────────────────────────
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
-             std_threshold: float, device: str = "cuda:0", uuid: str | None = None):
+             std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None):
     """Run alpha-corrected PnP evaluation on each split."""
 
     import yaml as _yaml
@@ -188,17 +184,21 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 outputs_raw = model(image)
 
-            # ── DER original PnP ──
-            angle_orig, dist_orig, ok_orig = run_pnp(outputs_raw, gtbbox, qgt, rgt)
-
-            # ── DER corrected PnP ──
-            coords_corr = correct_coords(
+            # ── DER original PnP (same NaN mask as corrected) ──
+            coords_corr, std_mask = correct_coords(
                 outputs_raw["c"].clone(), outputs_raw["logl"].clone(),
                 outputs_raw["loga"].clone(), outputs_raw["logb"].clone(),
-                alpha_table, std_threshold)
+                alpha_table, std_min, std_max)
 
-            # replace 'c' in outputs with corrected coords for PnP
-            outputs_corr = dict(outputs_raw)  # shallow copy
+            outputs_orig = dict(outputs_raw)
+            orig_c = outputs_raw["c"].clone()
+            mask_t = torch.tensor(std_mask, device=orig_c.device).unsqueeze(0).expand(1, 3, -1, -1)
+            orig_c[mask_t] = float("nan")
+            outputs_orig["c"] = orig_c
+            angle_orig, dist_orig, ok_orig = run_pnp(outputs_orig, gtbbox, qgt, rgt)
+
+            # ── DER corrected PnP ──
+            outputs_corr = dict(outputs_raw)
             outputs_corr["c"] = coords_corr
             angle_corr, dist_corr, ok_corr = run_pnp(outputs_corr, gtbbox, qgt, rgt)
 
@@ -225,7 +225,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         result = {
             "split":       split,
             "n_images":    n_total,
-            "std_threshold": std_threshold,
+            "std_range": {"min": std_min, "max": std_max},
             "DER":       {"angle": stats(der_angles), "dist": stats(der_dists)},
             "CORRECTED": {"angle": stats(corr_angles), "dist": stats(corr_dists)},
             "per_image": per_image,
@@ -253,8 +253,11 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--std_threshold", type=float, default=1.0)
+    parser.add_argument("--std_min", type=float, default=0.0,
+                        help="Per-axis total_std lower bound (pixels outside → NaN)")
+    parser.add_argument("--std_max", type=float, default=1.0,
+                        help="Per-axis total_std upper bound (pixels outside → NaN)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_threshold, args.device, args.uuid)
+    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max, args.device, args.uuid)
