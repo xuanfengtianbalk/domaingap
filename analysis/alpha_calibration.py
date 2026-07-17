@@ -30,7 +30,7 @@ from math_.q_ import quatProduct  # noqa: F401
 
 def sample_epsilon():
     """Return default epsilon values for FGSM attack."""
-    return [0.1, 1, 1.5, 1.6]
+    return [1.2, 1.4, 1.6, 1.8, 2.0]
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -665,7 +665,7 @@ if __name__ == "__main__":
                         default=None, help="FGSM epsilon values")
     parser.add_argument("--n_ts_bins", type=int, default=10,
                         help="Number of total_std percentile bins")
-    parser.add_argument("--max_samples", type=int, default=1000,
+    parser.add_argument("--max_samples", type=int, default=10000,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
