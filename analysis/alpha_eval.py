@@ -80,13 +80,18 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
     alea_var = b / (a - 1 + 1e-12)
     total_std = np.sqrt(np.maximum(epi_var + alea_var, 0.0))  # (3, H, W)
 
-    # pixels where any axis std is outside [min, max] → NaN
-    keep = np.ones((H, W), dtype=bool)
+    # too-low std → keep original DER, do NOT correct, do NOT NaN
+    # in-range std → apply alpha correction
+    # too-high std → NaN (exclude from PnP)
+    low = np.ones((H, W), dtype=bool)
+    mid = np.ones((H, W), dtype=bool)
     for ax in range(3):
-        keep &= (total_std[ax] >= std_min) & (total_std[ax] <= std_max)
+        low &= (total_std[ax] < std_min)
+        mid &= (total_std[ax] >= std_min) & (total_std[ax] <= std_max)
 
     coords_np = coords.squeeze(0).cpu().numpy()  # (3, H, W)
-    coords_np[:, ~keep] = float("nan")
+    nan_mask = ~(low | mid)
+    coords_np[:, nan_mask] = float("nan")
 
     for ax_idx, key in enumerate(["x", "y", "z"]):
         tbl = alpha_table[key]
@@ -104,13 +109,13 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
                 ma = grid.get((i, j))
                 if ma is None:
                     continue
-                mask = (ts_ax >= tlo) & (ts_ax < thi) & (pr_ax >= plo) & (pr_ax < phi) & keep
+                mask = (ts_ax >= tlo) & (ts_ax < thi) & (pr_ax >= plo) & (pr_ax < phi) & mid
                 if mask.sum() == 0:
                     continue
                 coords_np[ax_idx, mask] = pr_ax[mask] + ma * pr_ax[mask] * ts_ax[mask]
 
     result = torch.from_numpy(coords_np).unsqueeze(0).to(device).to(coords.dtype)
-    return result, ~keep
+    return result, nan_mask
 
 
 # ── PnP wrapper ──────────────────────────────────────────────────────────────
