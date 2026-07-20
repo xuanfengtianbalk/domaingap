@@ -30,7 +30,7 @@ from math_.q_ import quatProduct  # noqa: F401
 
 def sample_epsilon():
     """Return default epsilon values for FGSM attack."""
-    return [2.2]
+    return [3.0]
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -621,7 +621,7 @@ def _plot_ct_vs_uncertainty_for(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, n_ts_b
 
 
 def _plot_gt_conditioned_for(pred_by_ax, gt_by_ax, save_path):
-    """Mean pred + p25-p75 vs GT, 3 panels with identity line."""
+    """Mean pred + p25-p75 vs GT, 3 panels with identity line + degeneration center."""
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
     for ax_i, (ax, name) in enumerate(zip(axes, ["x", "y", "z"])):
         g = gt_by_ax[ax_i]; p = pred_by_ax[ax_i]
@@ -636,6 +636,10 @@ def _plot_gt_conditioned_for(pred_by_ax, gt_by_ax, save_path):
         ax.plot(gtm, ma, "o-", color="#1f77b4", markersize=3, label="DER")
         mx = max(abs(np.array(gtm).min()), abs(np.array(gtm).max())) * 1.1
         ax.plot([-mx, mx], [-mx, mx], "gray", linestyle=":", alpha=0.5)
+        # degeneration center: global mean prediction
+        dc = float(p.mean())
+        ax.axhline(dc, color="red", linestyle="--", alpha=0.6, linewidth=1)
+        ax.text(mx * 0.95, dc, f"{dc:+.1e}", color="red", fontsize=7, va="bottom", ha="right")
         ax.set_title(f"GT_{name}"); ax.legend(fontsize=7); ax.grid(True, alpha=0.2)
     fig.suptitle("prediction vs GT")
     plt.tight_layout(); plt.savefig(save_path, dpi=200); plt.close()
@@ -656,7 +660,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=1000,
+    parser.add_argument("--max_samples", type=int, default=100,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
