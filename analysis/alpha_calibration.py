@@ -667,6 +667,6 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    epsilons = args.epsilons if args.epsilons else sample_epsilon([3,4,5,6,7,8,9,10])
+    epsilons = args.epsilons if args.epsilons else sample_epsilon([2,2.5,3])
     print(f"Epsilons: {epsilons}")
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device)

@@ -180,9 +180,12 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         print(f"\n=== {split} ===")
         dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
 
-        der_angles, der_dists = [], []
-        corr_angles, corr_dists = [], []
+        base_angles, base_dists = [], []
+        excl_angles, excl_dists = [], []   # DER + exclusion filter
+        corr_angles, corr_dists = [], []    # alpha corrected
         per_image = []
+
+        has_excl = excl_center is not None and excl_radius is not None
 
         n_total = 0
         for samples, targets in tqdm(dl, desc=split, ncols=80):
@@ -196,45 +199,55 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 outputs_raw = model(image)
 
-            # ── std-filtered + alpha corrected coords ──
-            coords_corr, std_mask = correct_coords(
-                outputs_raw["c"].clone(), outputs_raw["logl"].clone(),
-                outputs_raw["loga"].clone(), outputs_raw["logb"].clone(),
+            # ── baseline: raw DER, no filtering ──
+            angle_base, dist_base, ok_base = run_pnp(outputs_raw, gtbbox, qgt, rgt)
+
+            # ── excluded: DER + exclusion filter ──
+            angle_excl = dist_excl = ok_excl = None
+            if has_excl:
+                excl_c = outputs_raw["c"].clone()
+                c_np = excl_c.squeeze(0).cpu().numpy()
+                mask = np.ones(c_np.shape[1:], dtype=bool)
+                for ax in range(3):
+                    mask &= (c_np[ax] >= excl_center[ax] - excl_radius[ax]) & \
+                            (c_np[ax] <= excl_center[ax] + excl_radius[ax])
+                c_np[:, mask] = float("nan")
+                excl_c = torch.from_numpy(c_np).unsqueeze(0).to(device)
+                outputs_excl = dict(outputs_raw)
+                outputs_excl["c"] = excl_c
+                angle_excl, dist_excl, ok_excl = run_pnp(outputs_excl, gtbbox, qgt, rgt)
+
+            # ── corrected: exclusion (optional) → alpha correction ──
+            if has_excl:
+                # apply exclusion filter BEFORE alpha correction
+                c_for_alpha = torch.from_numpy(c_np).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
+                raw_for_alpha = dict(outputs_raw)
+                raw_for_alpha["c"] = c_for_alpha
+            else:
+                raw_for_alpha = outputs_raw
+
+            coords_corr, _ = correct_coords(
+                raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
+                raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
                 alpha_table, std_min, std_max)
 
-            # ── exclusion filter: NaN pixels near degeneration center ──
-            if excl_center is not None and excl_radius is not None:
-                orig_c_np = outputs_raw["c"].clone().squeeze(0).cpu().numpy()
-                corr_c_np = coords_corr.squeeze(0).cpu().numpy()
-                mask = np.ones(orig_c_np.shape[1:], dtype=bool)
-                for ax in range(3):
-                    mask &= (orig_c_np[ax] >= excl_center[ax] - excl_radius[ax]) & \
-                            (orig_c_np[ax] <= excl_center[ax] + excl_radius[ax])
-                orig_c_np[:, mask] = float("nan")
-                corr_c_np[:, mask] = float("nan")
-                coords_corr = torch.from_numpy(corr_c_np).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
-                outputs_orig = dict(outputs_raw)
-                outputs_orig["c"] = torch.from_numpy(orig_c_np).unsqueeze(0).to(device)
-            else:
-                outputs_orig = outputs_raw
-
-            # ── DER original PnP ──
-            angle_orig, dist_orig, ok_orig = run_pnp(outputs_orig, gtbbox, qgt, rgt)
-
-            # ── DER corrected PnP ──
             outputs_corr = dict(outputs_raw)
             outputs_corr["c"] = coords_corr
             angle_corr, dist_corr, ok_corr = run_pnp(outputs_corr, gtbbox, qgt, rgt)
 
-            if ok_orig:
-                der_angles.append(angle_orig)
-                der_dists.append(dist_orig)
+            if ok_base:
+                base_angles.append(angle_base)
+                base_dists.append(dist_base)
+            if has_excl and ok_excl:
+                excl_angles.append(angle_excl)
+                excl_dists.append(dist_excl)
             if ok_corr:
                 corr_angles.append(angle_corr)
                 corr_dists.append(dist_corr)
 
             per_image.append({
-                "angle_orig": angle_orig, "dist_orig": dist_orig,
+                "angle_base": angle_base, "dist_base": dist_base,
+                "angle_excl": angle_excl, "dist_excl": dist_excl,
                 "angle_corr": angle_corr, "dist_corr": dist_corr,
             })
 
@@ -250,22 +263,27 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             "split":       split,
             "n_images":    n_total,
             "std_range": {"min": std_min, "max": std_max},
-            "DER":       {"angle": stats(der_angles), "dist": stats(der_dists)},
+            "BASELINE":  {"angle": stats(base_angles), "dist": stats(base_dists)},
             "CORRECTED": {"angle": stats(corr_angles), "dist": stats(corr_dists)},
             "per_image": per_image,
         }
+        if has_excl:
+            result["EXCLUDED"] = {"angle": stats(excl_angles), "dist": stats(excl_dists)}
 
         base = os.path.join(out_dir, split)
         with open(f"{base}.json", "w") as f:
             json.dump(result, f, indent=2)
+        csv_fields = ["angle_base", "dist_base", "angle_excl", "dist_excl", "angle_corr", "dist_corr"]
         with open(f"{base}.csv", "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["angle_orig", "dist_orig", "angle_corr", "dist_corr"])
+            w = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
             w.writeheader()
             w.writerows(per_image)
         print(f"  → {base}.json / .csv")
 
-        print(f"  DER:       angle={result['DER']['angle']['mean']:.2f}° ± {result['DER']['angle']['std']:.2f}  dist={result['DER']['dist']['mean']:.4f}  n={result['DER']['angle']['n']}")
-        print(f"  CORRECTED: angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
+        print(f"  BASELINE:   angle={result['BASELINE']['angle']['mean']:.2f}° ± {result['BASELINE']['angle']['std']:.2f}  dist={result['BASELINE']['dist']['mean']:.4f}  n={result['BASELINE']['angle']['n']}")
+        if has_excl:
+            print(f"  EXCLUDED:   angle={result['EXCLUDED']['angle']['mean']:.2f}° ± {result['EXCLUDED']['angle']['std']:.2f}  dist={result['EXCLUDED']['dist']['mean']:.4f}  n={result['EXCLUDED']['angle']['n']}")
+        print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -276,17 +294,17 @@ if __name__ == "__main__":
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=3000)
+    parser.add_argument("--max_samples", type=int, default=10)
     parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
-    parser.add_argument("--excl_cx", type=float, default=None, help="Exclusion zone center X")
-    parser.add_argument("--excl_cy", type=float, default=None, help="Exclusion zone center Y")
-    parser.add_argument("--excl_cz", type=float, default=None, help="Exclusion zone center Z")
-    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
-    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
-    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
+    parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
+    parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
+    parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
+    parser.add_argument("--excl_rx", type=float, default=0.02, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.02, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.02, help="Exclusion zone radius Z")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
