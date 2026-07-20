@@ -147,7 +147,7 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
-             excl_center: tuple = None, excl_radius: tuple = None):
+             excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -202,7 +202,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             # ── baseline: raw DER, no filtering ──
             angle_base, dist_base, ok_base = run_pnp(outputs_raw, gtbbox, qgt, rgt)
 
-            # ── excluded: DER + exclusion filter ──
+            # ── exclusion filter (shared for EXCLUDED + optional CORRECTED) ──
             angle_excl = dist_excl = ok_excl = None
             if has_excl:
                 excl_c = outputs_raw["c"].clone()
@@ -217,9 +217,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 outputs_excl["c"] = excl_c
                 angle_excl, dist_excl, ok_excl = run_pnp(outputs_excl, gtbbox, qgt, rgt)
 
-            # ── corrected: exclusion (optional) → alpha correction ──
-            if has_excl:
-                # apply exclusion filter BEFORE alpha correction
+            # ── corrected: optional exclusion → alpha correction ──
+            if has_excl and corr_excl:
                 c_for_alpha = torch.from_numpy(c_np).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
                 raw_for_alpha = dict(outputs_raw)
                 raw_for_alpha["c"] = c_for_alpha
@@ -305,14 +304,13 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rx", type=float, default=0.02, help="Exclusion zone radius X")
     parser.add_argument("--excl_ry", type=float, default=0.02, help="Exclusion zone radius Y")
     parser.add_argument("--excl_rz", type=float, default=0.02, help="Exclusion zone radius Z")
+    parser.add_argument("--corr_excl", action="store_true", default=False,
+                        help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    excl_center = None
-    excl_radius = None
-    if args.excl_cx is not None:
-        excl_center = (args.excl_cx, args.excl_cy, args.excl_cz)
-        excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz)
+    excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
+    excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
-             args.device, args.uuid, excl_center, excl_radius)
+             args.device, args.uuid, excl_center, excl_radius, args.corr_excl)
