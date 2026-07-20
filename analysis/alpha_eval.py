@@ -130,7 +130,7 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 
     gtb = gtbbox.cpu().detach().numpy()
     try:
-        is_true, qvecs, tvecs = pose_calculats_from_coors(Camera.K, coormap_np, gtb[0])
+        is_true, qvecs, tvecs = pose_calculats_from_coors(Camera.K, coormap_np, gtb)
     except Exception:
         is_true, qvecs, tvecs = False, None, None
 
@@ -190,7 +190,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         n_total = 0
         for samples, targets in tqdm(dl, desc=split, ncols=80):
             image = samples.to(device)
-            gtbbox = torch.round(targets["boxes"].squeeze(0))
+            gtbbox = torch.round(targets["boxes"].squeeze())  # (1,1,4) → (4,)
             qgt = targets["q_gt"].squeeze()
             rgt = targets["r_gt"].squeeze()
             n_total += 1
@@ -293,7 +293,7 @@ if __name__ == "__main__":
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=10)
+    parser.add_argument("--max_samples", type=int, default=10000)
     parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
@@ -301,9 +301,9 @@ if __name__ == "__main__":
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
     parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
-    parser.add_argument("--excl_rx", type=float, default=0.02, help="Exclusion zone radius X")
-    parser.add_argument("--excl_ry", type=float, default=0.02, help="Exclusion zone radius Y")
-    parser.add_argument("--excl_rz", type=float, default=0.02, help="Exclusion zone radius Z")
+    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--device", default="cuda:0")
