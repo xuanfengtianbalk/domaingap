@@ -184,18 +184,14 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 outputs_raw = model(image)
 
-            # ── DER original PnP (same NaN mask as corrected) ──
+            # ── DER original PnP (unfiltered) ──
+            angle_orig, dist_orig, ok_orig = run_pnp(outputs_raw, gtbbox, qgt, rgt)
+
+            # ── DER corrected PnP (std filtered + alpha correction) ──
             coords_corr, std_mask = correct_coords(
                 outputs_raw["c"].clone(), outputs_raw["logl"].clone(),
                 outputs_raw["loga"].clone(), outputs_raw["logb"].clone(),
                 alpha_table, std_min, std_max)
-
-            outputs_orig = dict(outputs_raw)
-            orig_c = outputs_raw["c"].clone()
-            mask_t = torch.tensor(std_mask, device=orig_c.device).unsqueeze(0).expand(1, 3, -1, -1)
-            orig_c[mask_t] = float("nan")
-            outputs_orig["c"] = orig_c
-            angle_orig, dist_orig, ok_orig = run_pnp(outputs_orig, gtbbox, qgt, rgt)
 
             # ── DER corrected PnP ──
             outputs_corr = dict(outputs_raw)
@@ -252,10 +248,10 @@ if __name__ == "__main__":
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--max_samples", type=int, default=3000)
     parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
-    parser.add_argument("--std_max", type=float, default=1.0,
+    parser.add_argument("--std_max", type=float, default=10.0,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()

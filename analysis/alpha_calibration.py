@@ -30,7 +30,7 @@ from math_.q_ import quatProduct  # noqa: F401
 
 def sample_epsilon():
     """Return default epsilon values for FGSM attack."""
-    return [1.2, 1.4, 1.6, 1.8, 2.0]
+    return [2.2]
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -229,7 +229,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     step = gr["bin_step"]
     trim_pct = gr.get("trim_pct", 0.1)
     if std_bins is None:
-        std_bins = [0.01, 0.05, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0, 5.0]
+        std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
+                    1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
+                    2.5,3.0,3.5,4.0,4.7,5.0]
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -654,7 +656,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=10000,
+    parser.add_argument("--max_samples", type=int, default=1000,
                         help="Max validation images")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
