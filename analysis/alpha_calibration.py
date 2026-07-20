@@ -28,9 +28,11 @@ from math_.q_ import quatProduct  # noqa: F401
 
 # ── epsilon sampling ─────────────────────────────────────────────────────────
 
-def sample_epsilon():
+def sample_epsilon(eps):
     """Return default epsilon values for FGSM attack."""
-    return [3.0]
+    if eps is None:
+        return [2.0]
+    return eps
 
 
 # ── FGSM attack ──────────────────────────────────────────────────────────────
@@ -665,6 +667,6 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    epsilons = args.epsilons if args.epsilons else sample_epsilon()
+    epsilons = args.epsilons if args.epsilons else sample_epsilon([3,4,5,6,7,8,9,10])
     print(f"Epsilons: {epsilons}")
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device)

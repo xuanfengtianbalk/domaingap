@@ -146,7 +146,14 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 # ── main eval ────────────────────────────────────────────────────────────────
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
-             std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None):
+             std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
+             excl_center: tuple = None, excl_radius: tuple = None):
+    """Run alpha-corrected PnP evaluation on each split.
+
+    Args:
+        excl_center: (cx, cy, cz) — exclusion zone center
+        excl_radius: (rx, ry, rz) — exclusion zone half-width per axis
+    """
     """Run alpha-corrected PnP evaluation on each split."""
 
     import yaml as _yaml
@@ -189,14 +196,30 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 outputs_raw = model(image)
 
-            # ── DER original PnP (unfiltered) ──
-            angle_orig, dist_orig, ok_orig = run_pnp(outputs_raw, gtbbox, qgt, rgt)
-
-            # ── DER corrected PnP (std filtered + alpha correction) ──
+            # ── std-filtered + alpha corrected coords ──
             coords_corr, std_mask = correct_coords(
                 outputs_raw["c"].clone(), outputs_raw["logl"].clone(),
                 outputs_raw["loga"].clone(), outputs_raw["logb"].clone(),
                 alpha_table, std_min, std_max)
+
+            # ── exclusion filter: NaN pixels near degeneration center ──
+            if excl_center is not None and excl_radius is not None:
+                orig_c_np = outputs_raw["c"].clone().squeeze(0).cpu().numpy()
+                corr_c_np = coords_corr.squeeze(0).cpu().numpy()
+                mask = np.ones(orig_c_np.shape[1:], dtype=bool)
+                for ax in range(3):
+                    mask &= (orig_c_np[ax] >= excl_center[ax] - excl_radius[ax]) & \
+                            (orig_c_np[ax] <= excl_center[ax] + excl_radius[ax])
+                orig_c_np[:, mask] = float("nan")
+                corr_c_np[:, mask] = float("nan")
+                coords_corr = torch.from_numpy(corr_c_np).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
+                outputs_orig = dict(outputs_raw)
+                outputs_orig["c"] = torch.from_numpy(orig_c_np).unsqueeze(0).to(device)
+            else:
+                outputs_orig = outputs_raw
+
+            # ── DER original PnP ──
+            angle_orig, dist_orig, ok_orig = run_pnp(outputs_orig, gtbbox, qgt, rgt)
 
             # ── DER corrected PnP ──
             outputs_corr = dict(outputs_raw)
@@ -258,7 +281,20 @@ if __name__ == "__main__":
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
+    parser.add_argument("--excl_cx", type=float, default=None, help="Exclusion zone center X")
+    parser.add_argument("--excl_cy", type=float, default=None, help="Exclusion zone center Y")
+    parser.add_argument("--excl_cz", type=float, default=None, help="Exclusion zone center Z")
+    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max, args.device, args.uuid)
+    excl_center = None
+    excl_radius = None
+    if args.excl_cx is not None:
+        excl_center = (args.excl_cx, args.excl_cy, args.excl_cz)
+        excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz)
+
+    evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
+             args.device, args.uuid, excl_center, excl_radius)
