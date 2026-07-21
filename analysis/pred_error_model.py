@@ -425,32 +425,25 @@ def main():
             ss_res = ((error[keep] - y_pred) ** 2).sum()
             ss_tot = ((error[keep] - error[keep].mean()) ** 2).sum()
             r2 = float(1 - ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
-
-            # correlation
-            r_pearson = float(np.corrcoef(ts[keep], error[keep])[0, 1])
             pct_excluded = float(1 - keep.mean()) * 100
             rows_all.append({
                 "axis": ax_name, "radius": r,
-                "r2": r2, "r_pearson": r_pearson,
+                "r2": r2,
                 "n": int(keep.sum()), "pct_excluded": pct_excluded,
             })
 
     # ── plot ──
     colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
     for ax_name in ["x", "y", "z"]:
         pts = [r for r in rows_all if r["axis"] == ax_name]
         pts.sort(key=lambda r: r["radius"])
         rr, r2 = [r["radius"] for r in pts], [r["r2"] for r in pts]
-        axes[0].plot(rr, r2, "o-", color=colors[ax_name], markersize=5, label=ax_name)
-        rp = [r["r_pearson"] for r in pts]
-        axes[1].plot(rr, rp, "o-", color=colors[ax_name], markersize=5, label=ax_name)
+        ax.plot(rr, r2, "o-", color=colors[ax_name], markersize=5, label=ax_name)
 
-    axes[0].set_xlabel("Exclusion radius"); axes[0].set_ylabel("R²"); axes[0].set_title("R²(std→error) vs excl radius")
-    axes[0].legend(); axes[0].grid(True, alpha=0.2)
-    axes[1].set_xlabel("Exclusion radius"); axes[1].set_ylabel("Pearson r"); axes[1].set_title("corr(std, error) vs excl radius")
-    axes[1].legend(); axes[1].grid(True, alpha=0.2)
-    fig.suptitle("Per-axis: total_std vs error with exclusion sweep")
+    ax.set_xlabel("Exclusion radius"); ax.set_ylabel("R²")
+    ax.set_title("R²(std→error) vs exclusion radius")
+    ax.legend(); ax.grid(True, alpha=0.2)
     plt.tight_layout()
     save_path = os.path.join(OUT_DIR, "std_vs_error_sweep.png")
     plt.savefig(save_path, dpi=200)
