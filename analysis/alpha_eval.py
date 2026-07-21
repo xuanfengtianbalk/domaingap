@@ -148,7 +148,8 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
              excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
-             excl_mode: str = "and"):
+             excl_mode: str = "and",
+             excl_sweep_r: list = None):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -156,6 +157,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         excl_radius: (rx, ry, rz) — exclusion zone half-width per axis
         corr_excl: apply exclusion to CORRECTED mode as well
         excl_mode: "and" (all axes in zone) or "or" (any axis in zone)
+        excl_sweep_r: list of radii for sweep mode (enables ratio vs error analysis)
     """
 
     import yaml as _yaml
@@ -178,9 +180,17 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
     model, bc = load_model(uuid, model_type, bb, device)
     model.eval()
 
+    has_excl = excl_center is not None and excl_radius is not None
+    do_sweep = excl_sweep_r is not None and len(excl_sweep_r) > 0 and excl_center is not None
+
     for split in splits:
         print(f"\n=== {split} ===")
         dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
+
+        if do_sweep:
+            _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_mode,
+                       corr_excl, excl_sweep_r, out_dir, split, device)
+            continue
 
         base_angles, base_dists = [], []
         excl_angles, excl_dists = [], []   # DER + exclusion filter
@@ -292,6 +302,150 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
 
 
+# ── exclusion ratio sweep ─────────────────────────────────────────────────────
+
+def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_mode,
+               corr_excl, sweep_r, out_dir, split, device):
+    """Sweep over exclusion radii, collecting ratio vs PnP error."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = []
+    n_images = 0
+    for samples, targets in tqdm(dl, desc=f"{split} sweep", ncols=80):
+        image = samples.to(device)
+        gtbbox = torch.round(targets["boxes"].squeeze())
+        qgt = targets["q_gt"].squeeze()
+        rgt = targets["r_gt"].squeeze()
+
+        with torch.no_grad(), torch.amp.autocast("cuda"):
+            outputs_raw = model(image)
+
+        # BASELINE (once per image)
+        angle_base, dist_base, _ = run_pnp(outputs_raw, gtbbox, qgt, rgt)
+
+        c_np_full = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
+        total_valid = np.isfinite(c_np_full[0]).sum()
+
+        for radius in sweep_r:
+            r3 = (radius, radius, radius)
+            mask = _compute_excl_mask(c_np_full, excl_center, r3, excl_mode)
+            ratio = float(mask.sum()) / total_valid if total_valid > 0 else 0.0
+
+            c_excl = c_np_full.copy()
+            c_excl[:, mask] = float("nan")
+            c_excl_t = torch.from_numpy(c_excl).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
+
+            outputs_excl = dict(outputs_raw)
+            outputs_excl["c"] = c_excl_t
+            angle_excl, dist_excl, _ = run_pnp(outputs_excl, gtbbox, qgt, rgt)
+
+            # CORRECTED
+            if corr_excl:
+                raw_for_alpha = dict(outputs_raw)
+                raw_for_alpha["c"] = c_excl_t
+            else:
+                raw_for_alpha = outputs_raw
+
+            coords_corr, _ = correct_coords(
+                raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
+                raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
+                alpha_table, std_min, std_max)
+
+            outputs_corr = dict(outputs_raw)
+            outputs_corr["c"] = coords_corr
+            angle_corr, dist_corr, _ = run_pnp(outputs_corr, gtbbox, qgt, rgt)
+
+            rows.append({
+                "radius": radius, "ratio": ratio,
+                "angle_base": angle_base, "angle_excl": angle_excl, "angle_corr": angle_corr,
+                "dist_base": dist_base, "dist_excl": dist_excl, "dist_corr": dist_corr,
+            })
+        n_images += 1
+
+    # save CSV
+    csv_path = os.path.join(out_dir, f"{split}_excl_ratio_sweep.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
+    print(f"  → {csv_path} ({len(rows)} points)")
+
+    # plot
+    _plot_sweep(rows, out_dir, split)
+
+
+def _compute_excl_mask(c_np, center, radius_3, mode):
+    if mode == "and":
+        mask = np.ones(c_np.shape[1:], dtype=bool)
+        for ax in range(3):
+            mask &= (c_np[ax] >= center[ax] - radius_3[ax]) & \
+                    (c_np[ax] <= center[ax] + radius_3[ax])
+    else:
+        mask = np.zeros(c_np.shape[1:], dtype=bool)
+        for ax in range(3):
+            mask |= (c_np[ax] >= center[ax] - radius_3[ax]) & \
+                    (c_np[ax] <= center[ax] + radius_3[ax])
+    return mask
+
+
+def _plot_sweep(rows, out_dir, split):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ratios = np.array([r["ratio"] for r in rows])
+    for ykey, ylabel, fname in [
+        ("angle", "Angle Error (°)", "excl_ratio_vs_angle"),
+        ("dist", "Distance Error", "excl_ratio_vs_dist"),
+    ]:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        # BASELINE: constant reference line
+        base_vals = np.array([r[f"{ykey}_base"] for r in rows])
+        base_mean = np.nanmean(base_vals)
+        ax.axhline(base_mean, color="blue", linestyle="--", alpha=0.5,
+                   label=f"BASELINE ({base_mean:.2f})")
+
+        # EXCL scatter per radius bin (mean ± std)
+        radii_uniq = sorted(set(r["radius"] for r in rows))
+        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(radii_uniq)))
+        for ki, rad in enumerate(radii_uniq):
+            pts = [r for r in rows if r["radius"] == rad]
+            rr = np.array([r["ratio"] for r in pts])
+            ee = np.array([r[f"{ykey}_excl"] for r in pts])
+            ee = ee[np.isfinite(ee)]
+            if len(ee) < 2:
+                continue
+            ax.scatter(rr, ee, s=8, color=colors[ki], alpha=0.5)
+            ax.plot(np.nanmean(rr), np.nanmean(ee), "o", color=colors[ki],
+                    markersize=8, label=f"r={rad:.2f}")
+
+        # CORR (if present)
+        corr_vals = [r["angle_corr"] for r in rows if not math.isnan(r["angle_corr"])]
+        if corr_vals:
+            for ki, rad in enumerate(radii_uniq):
+                pts = [r for r in rows if r["radius"] == rad]
+                rr = np.array([r["ratio"] for r in pts])
+                cc = np.array([r[f"{ykey}_corr"] for r in pts])
+                cc = cc[np.isfinite(cc)]
+                if len(cc) < 2:
+                    continue
+                ax.plot(np.nanmean(rr), np.nanmean(cc), "s", color=colors[ki],
+                        markersize=8, markerfacecolor="none")
+
+        ax.set_xlabel("Exclusion ratio")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{split}: {ylabel} vs exclusion ratio")
+        ax.legend(fontsize=6, ncol=3, loc="upper left")
+        ax.grid(True, alpha=0.2)
+        plt.tight_layout()
+        save_path = os.path.join(out_dir, f"{split}_{fname}.png")
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+        print(f"  → {save_path}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -313,13 +467,16 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
-    parser.add_argument("--excl_mode", choices=["and", "or"], default="and",
+    parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
+    parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
+                        help="Exclusion radius sweep (enables ratio vs error analysis)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
+    sweep_r = args.excl_sweep_r if args.excl_sweep_r else None
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
-             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode)
+             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r)
