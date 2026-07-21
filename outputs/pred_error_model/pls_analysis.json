@@ -1,7 +1,7 @@
 {
   "metadata": {
     "alpha_csv": "/opt/dl_workspace/algorithm/04-myself/domaingap/outputs/alpha_cali/alpha_cali.csv",
-    "max_samples": 50000
+    "max_samples": 30000
   },
   "results": {
     "x": {
