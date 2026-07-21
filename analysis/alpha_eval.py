@@ -147,14 +147,16 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
-             excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False):
+             excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
+             excl_mode: str = "and"):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
         excl_center: (cx, cy, cz) — exclusion zone center
         excl_radius: (rx, ry, rz) — exclusion zone half-width per axis
+        corr_excl: apply exclusion to CORRECTED mode as well
+        excl_mode: "and" (all axes in zone) or "or" (any axis in zone)
     """
-    """Run alpha-corrected PnP evaluation on each split."""
 
     import yaml as _yaml
     cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -207,10 +209,15 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             if has_excl:
                 excl_c = outputs_raw["c"].clone()
                 c_np = excl_c.squeeze(0).cpu().numpy()
-                mask = np.ones(c_np.shape[1:], dtype=bool)
+                if excl_mode == "and":
+                    mask = np.ones(c_np.shape[1:], dtype=bool)
+                    op = np.logical_and
+                else:
+                    mask = np.zeros(c_np.shape[1:], dtype=bool)
+                    op = np.logical_or
                 for ax in range(3):
-                    mask &= (c_np[ax] >= excl_center[ax] - excl_radius[ax]) & \
-                            (c_np[ax] <= excl_center[ax] + excl_radius[ax])
+                    mask = op(mask, (c_np[ax] >= excl_center[ax] - excl_radius[ax]) &
+                                    (c_np[ax] <= excl_center[ax] + excl_radius[ax]))
                 c_np[:, mask] = float("nan")
                 excl_c = torch.from_numpy(c_np).unsqueeze(0).to(device)
                 outputs_excl = dict(outputs_raw)
@@ -306,6 +313,8 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
+    parser.add_argument("--excl_mode", choices=["and", "or"], default="and",
+                        help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -313,4 +322,4 @@ if __name__ == "__main__":
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
-             args.device, args.uuid, excl_center, excl_radius, args.corr_excl)
+             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode)
