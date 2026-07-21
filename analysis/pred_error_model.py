@@ -266,24 +266,122 @@ def run_sweep_4d(data: dict, excl_center: tuple, sweep_r: list):
     print(f"  -> {save_path}")
 
 
+# ── per-axis PLS (from raw 3D data, axis-specific error) ────────────────────
+
+def run_pls_per_axis(data: dict, axis_idx: int, axis_name: str,
+                     excl_center: tuple = None, sweep_r: float = None, plot: bool = True):
+    from sklearn.cross_decomposition import PLSRegression
+
+    pred = data["pred"][:, axis_idx]
+    gt   = data["gt"][:, axis_idx]
+    ts   = data["ts"][:, axis_idx]
+    error = np.abs(pred - gt)
+    N = len(error)
+
+    if sweep_r is not None and excl_center is not None:
+        keep = np.abs(pred - excl_center[axis_idx]) >= sweep_r
+        pred = pred[keep]; gt = gt[keep]; ts = ts[keep]; error = error[keep]
+        pct_excluded = float(1 - keep.mean()) * 100
+    else:
+        pct_excluded = 0.0
+
+    if len(error) < 10:
+        return None
+
+    X = np.column_stack([ts, pred])
+    y = error
+
+    pls = PLSRegression(n_components=2)
+    pls.fit(X, y)
+    y_pred = pls.predict(X).ravel()
+
+    r2 = float(1 - ((y - y_pred) ** 2).sum() / ((y - y.mean()) ** 2).sum())
+    rmse = float(np.sqrt(((y - y_pred) ** 2).mean()))
+    mae  = float(np.abs(y - y_pred).mean())
+    coef = pls.coef_.reshape(-1)
+
+    if plot:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+        axes[0].scatter(y, y_pred, s=2, alpha=0.3, color="#1f77b4")
+        mx = max(y.max(), y_pred.max())
+        axes[0].plot([0, mx], [0, mx], "k--", alpha=0.3)
+        axes[0].set_xlabel(f"True |error_{axis_name}|")
+        axes[0].set_ylabel(f"Predicted |error_{axis_name}|")
+        axes[0].set_title(f"R²={r2:.3f} RMSE={rmse:.4f} MAE={mae:.4f}")
+        axes[0].grid(True, alpha=0.15)
+
+        axes[1].bar(["total_std", f"pred_{axis_name}"], np.abs(coef), color=["#d62728", "#1f77b4"])
+        axes[1].set_ylabel("|coefficient|")
+        axes[1].set_title("PLS feature importance")
+
+        fig.suptitle(f"PLS regression — axis {axis_name}")
+        plt.tight_layout()
+        save_path = os.path.join(OUT_DIR, f"pls_raw_{axis_name}.png")
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+
+    return {
+        "axis": axis_name, "r2": r2, "rmse": rmse, "mae": mae, "n_samples": len(y),
+        "pct_excluded": pct_excluded,
+        "coeff": {"total_std": float(coef[0]), f"pred_{axis_name}": float(coef[1]) if len(coef) > 1 else 0.0},
+    }
+
+
+def run_sweep_per_axis(data: dict, excl_center: tuple, sweep_r: list):
+    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    for ax_idx, ax_name in enumerate(["x", "y", "z"]):
+        rows = []
+        for r in sweep_r:
+            res = run_pls_per_axis(data, ax_idx, ax_name, excl_center, sweep_r=r, plot=False)
+            if res:
+                res["radius"] = r
+                rows.append(res)
+                print(f"  sweep {ax_name} r={r:.2f}: R²={res['r2']:.3f} rmse={res['rmse']:.4f} excluded={res['pct_excluded']:.1f}%")
+
+        if not rows:
+            continue
+        rr = [r["radius"] for r in rows]
+        axes[0].plot(rr, [r["r2"] for r in rows], "o-", color=colors[ax_name], markersize=5, label=f"{ax_name} R²")
+        axes[1].plot(rr, [np.abs(r["coeff"]["total_std"]) for r in rows], "o-", color=colors[ax_name], markersize=5, label=f"{ax_name} std")
+        axes[2].plot(rr, [np.abs(r["coeff"][f"pred_{ax_name}"]) for r in rows], "o-", color=colors[ax_name], markersize=5, label=f"{ax_name} pred")
+
+    for ax, ylabel, title in [
+        (axes[0], "R²", "R² vs exclusion radius"),
+        (axes[1], "|coeff total_std|", "total_std coefficient"),
+        (axes[2], "|coeff pred|", "pred coefficient"),
+    ]:
+        ax.set_xlabel("Exclusion radius")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.2)
+
+    fig.suptitle("Per-axis PLS: exclusion sweep (raw pixel data)")
+    plt.tight_layout()
+    save_path = os.path.join(OUT_DIR, "pls_sweep_raw_per_axis.png")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"  -> {save_path}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="PCA + PLS error model")
-    parser.add_argument("--save_npz", action="store_true", help="Collect & save raw per-pixel data")
-    parser.add_argument("--raw_npz", type=str, default=None, help="Raw pixel .npz for 4D analysis")
-    parser.add_argument("--alpha_csv", default=None, help="CSV for per-axis analysis (fallback)")
+    parser = argparse.ArgumentParser(description="Std vs error analysis with exclusion sweep")
+    parser.add_argument("--save_npz", action="store_true")
+    parser.add_argument("--raw_npz", type=str, default=None)
     parser.add_argument("--uuid", default=None)
     parser.add_argument("--max_samples", type=int, default=100)
     parser.add_argument("--excl_cx", type=float, default=0.045)
     parser.add_argument("--excl_cy", type=float, default=0.057)
     parser.add_argument("--excl_cz", type=float, default=0.16)
     parser.add_argument("--sweep_r", nargs="*", type=float,
-                        default=[0.10, 0.15, 0.20, 0.25, 0.30])
+                        default=[0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30])
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    # ── save_npz mode ──
     if args.save_npz:
         import yaml as _yaml
         cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -294,32 +392,77 @@ def main():
         collect_raw_pixels(uuid, args.max_samples, args.device, save_path)
         return
 
-    # ── raw_npz mode (4D analysis) ──
-    if args.raw_npz:
-        npz_path = args.raw_npz if os.path.isabs(args.raw_npz) else os.path.join(PROJECT_ROOT, args.raw_npz)
-        if not os.path.exists(npz_path):
-            npz_path = os.path.join(OUT_DIR, os.path.basename(args.raw_npz))
-        data = load_raw_data(npz_path, args.max_samples * 500 if args.max_samples else None)
-        print(f"Loaded {data['pred'].shape[0]} pixels from {npz_path}")
-
-        res_base = run_pls_4d(data, plot=True, label="all")
-        pca_res = run_pca_4d(data)
-
-        excl_center = (args.excl_cx, args.excl_cy, args.excl_cz)
-        run_sweep_4d(data, excl_center, args.sweep_r)
-
-        with open(os.path.join(OUT_DIR, "pls_4d.json"), "w") as f:
-            json.dump({"metadata": {"raw_npz": args.raw_npz}, "base": res_base,
-                       "pca": pca_res}, f, indent=2)
+    if not args.raw_npz:
+        print("Specify --raw_npz or --save_npz")
         return
 
-    # ── legacy CSV mode ──
-    if args.alpha_csv is None:
-        print("No input specified. Use --save_npz, --raw_npz, or --alpha_csv.")
-        return
+    npz_path = args.raw_npz if os.path.isabs(args.raw_npz) else os.path.join(PROJECT_ROOT, args.raw_npz)
+    if not os.path.exists(npz_path):
+        npz_path = os.path.join(OUT_DIR, os.path.basename(args.raw_npz))
+    data = load_raw_data(npz_path)
+    print(f"Loaded {data['pred'].shape[0]} pixels")
 
-    import legacy_csv as _lc
-    _lc.csv_main(args)
+    center = {"x": args.excl_cx, "y": args.excl_cy, "z": args.excl_cz}
+    sweep_r = args.sweep_r
+
+    # ── per-axis: R²(std, error) vs exclusion radius ──
+    rows_all = []
+    for ax_name, ax_idx in [("x", 0), ("y", 1), ("z", 2)]:
+        pred = data["pred"][:, ax_idx]
+        gt   = data["gt"][:, ax_idx]
+        ts   = data["ts"][:, ax_idx]
+        error = np.abs(pred - gt)
+        cx = center[ax_name]
+
+        for r in sweep_r:
+            keep = np.abs(pred - cx) >= r
+            if keep.sum() < 50:
+                continue
+            # R² of total_std alone
+            from sklearn.linear_model import LinearRegression
+            m = LinearRegression().fit(ts[keep].reshape(-1, 1), error[keep])
+            y_pred = m.predict(ts[keep].reshape(-1, 1))
+            ss_res = ((error[keep] - y_pred) ** 2).sum()
+            ss_tot = ((error[keep] - error[keep].mean()) ** 2).sum()
+            r2 = float(1 - ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+
+            # correlation
+            r_pearson = float(np.corrcoef(ts[keep], error[keep])[0, 1])
+            pct_excluded = float(1 - keep.mean()) * 100
+            rows_all.append({
+                "axis": ax_name, "radius": r,
+                "r2": r2, "r_pearson": r_pearson,
+                "n": int(keep.sum()), "pct_excluded": pct_excluded,
+            })
+
+    # ── plot ──
+    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    for ax_name in ["x", "y", "z"]:
+        pts = [r for r in rows_all if r["axis"] == ax_name]
+        pts.sort(key=lambda r: r["radius"])
+        rr, r2 = [r["radius"] for r in pts], [r["r2"] for r in pts]
+        axes[0].plot(rr, r2, "o-", color=colors[ax_name], markersize=5, label=ax_name)
+        rp = [r["r_pearson"] for r in pts]
+        axes[1].plot(rr, rp, "o-", color=colors[ax_name], markersize=5, label=ax_name)
+
+    axes[0].set_xlabel("Exclusion radius"); axes[0].set_ylabel("R²"); axes[0].set_title("R²(std→error) vs excl radius")
+    axes[0].legend(); axes[0].grid(True, alpha=0.2)
+    axes[1].set_xlabel("Exclusion radius"); axes[1].set_ylabel("Pearson r"); axes[1].set_title("corr(std, error) vs excl radius")
+    axes[1].legend(); axes[1].grid(True, alpha=0.2)
+    fig.suptitle("Per-axis: total_std vs error with exclusion sweep")
+    plt.tight_layout()
+    save_path = os.path.join(OUT_DIR, "std_vs_error_sweep.png")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"  -> {save_path}")
+
+    with open(os.path.join(OUT_DIR, "std_vs_error_sweep.json"), "w") as f:
+        json.dump({"sweep_r": sweep_r, "rows": rows_all}, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
