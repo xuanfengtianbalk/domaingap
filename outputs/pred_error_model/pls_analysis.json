@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "alpha_csv": "/opt/dl_workspace/algorithm/04-myself/domaingap/outputs/alpha_cali/alpha_cali.csv",
+    "max_samples": 50000
+  },
+  "results": {
+    "x": {
+      "axis": "x",
+      "n_samples": 586,
+      "r2": 0.47269134982979133,
+      "rmse": 0.058075846345366194,
+      "mae": 0.04355521303571021,
+      "coefficients": {
+        "total_std": 0.6861637469628202,
+        "pred_x": -0.012384706649797239
+      }
+    },
+    "y": {
+      "axis": "y",
+      "n_samples": 541,
+      "r2": 0.8009675580474133,
+      "rmse": 0.03947807599991724,
+      "mae": 0.023927143204345257,
+      "coefficients": {
+        "total_std": 0.8948271554236841,
+        "pred_y": -0.0009580339639994893
+      }
+    },
+    "z": {
+      "axis": "z",
+      "n_samples": 201,
+      "r2": 0.3579423633698513,
+      "rmse": 0.017063595915143913,
+      "mae": 0.01318271638212164,
+      "coefficients": {
+        "total_std": 0.5019345085958097,
+        "pred_z": -0.3007374043334571
+      }
+    }
+  }
+}
