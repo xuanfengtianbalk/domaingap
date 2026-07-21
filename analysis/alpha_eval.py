@@ -230,6 +230,19 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 for ax in range(3):
                     mask = op(mask, (c_np[ax] >= excl_center[ax] - excl_radius[ax]) &
                                     (c_np[ax] <= excl_center[ax] + excl_radius[ax]))
+                # only exclude center pixels with high uncertainty
+                if std_excl_min > 0:
+                    logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+                    loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+                    logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+                    a_np = np.exp(loga) + 1.0 + 1e-6
+                    b_np = np.exp(logb) + 1e-6
+                    v_np = np.exp(logl) + 1e-6
+                    epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+                    alea_var = b_np / (a_np - 1 + 1e-12)
+                    ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+                    ts_scalar = np.sqrt((ts_3d ** 2).sum(axis=0))
+                    mask = mask & (ts_scalar > std_excl_min)
                 c_np[:, mask] = float("nan")
                 excl_c = torch.from_numpy(c_np).unsqueeze(0).to(device)
                 outputs_excl = dict(outputs_raw)
@@ -537,7 +550,7 @@ if __name__ == "__main__":
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=300)
+    parser.add_argument("--max_samples", type=int, default=10000)
     parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
@@ -550,13 +563,13 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
-    parser.add_argument("--excl_mode", choices=["and", "or"], default="and",
+    parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
-    parser.add_argument("--no_sweep", action="store_true", default=False,
+    parser.add_argument("--no_sweep", action="store_true", default=True,
                         help="Disable radius sweep, use standard single-excl mode")
-    parser.add_argument("--std_excl_min", type=float, default=0.0,
+    parser.add_argument("--std_excl_min", type=float, default=0.1,
                         help="Only exclude pixels with total_std > this value")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
