@@ -149,7 +149,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
              excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
              excl_mode: str = "and",
-             excl_sweep_r: list = None):
+             excl_sweep_r: list = None, std_excl_min: float = 0.0):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -189,7 +189,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
         if do_sweep:
             _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
-                       corr_excl, sweep_r, out_dir, split, device)
+                       corr_excl, sweep_r, std_excl_min, out_dir, split, device)
             continue
 
         base_angles, base_dists = [], []
@@ -333,8 +333,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 # ── exclusion ratio sweep ─────────────────────────────────────────────────────
 
 def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
-               corr_excl, sweep_r, out_dir, split, device):
-    """Sweep over exclusion radii — PnP runs once per image, only ratio varies."""
+               corr_excl, sweep_r, std_excl_min, out_dir, split, device):
+    """Sweep over exclusion radii + std threshold — PnP runs once per image, only ratio varies."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -353,11 +353,28 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radiu
         c_np_full = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
         total_valid = np.isfinite(c_np_full[0]).sum()
 
+        # scalar total_std per pixel
+        logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+        loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+        logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+        a_np = np.exp(loga) + 1.0 + 1e-6
+        b_np = np.exp(logb) + 1e-6
+        v_np = np.exp(logl) + 1e-6
+        epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+        alea_var = b_np / (a_np - 1 + 1e-12)
+        ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))  # (3, H, W)
+        ts_scalar = np.sqrt((ts_3d ** 2).sum(axis=0))          # (H, W) scalar
+
         # ── BASELINE ──
         angle_base, dist_base, _ = run_pnp(outputs_raw, gtbbox, qgt, rgt)
 
-        # ── EXCLUDED (standard excl_radius) ──
-        mask_std = _compute_excl_mask(c_np_full, excl_center, excl_radius, excl_mode)
+        # ── EXCLUDED (standard excl_radius + std threshold) ──
+        mask_center = _compute_excl_mask(c_np_full, excl_center, excl_radius, excl_mode)
+        if std_excl_min > 0:
+            mask_std_thr = ts_scalar > std_excl_min
+            mask_std = mask_center & mask_std_thr
+        else:
+            mask_std = mask_center
         c_excl_std = c_np_full.copy()
         c_excl_std[:, mask_std] = float("nan")
         outputs_excl_std = dict(outputs_raw)
@@ -380,7 +397,11 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radiu
         # ── Sweep: ratio only ──
         for radius in sweep_r:
             r3 = (radius, radius, radius)
-            mask = _compute_excl_mask(c_np_full, excl_center, r3, excl_mode)
+            mask_c = _compute_excl_mask(c_np_full, excl_center, r3, excl_mode)
+            if std_excl_min > 0:
+                mask = mask_c & (ts_scalar > std_excl_min)
+            else:
+                mask = mask_c
             ratio = float(mask.sum()) / total_valid if total_valid > 0 else 0.0
             rows.append({
                 "radius": radius, "ratio": ratio,
@@ -535,6 +556,8 @@ if __name__ == "__main__":
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
     parser.add_argument("--no_sweep", action="store_true", default=False,
                         help="Disable radius sweep, use standard single-excl mode")
+    parser.add_argument("--std_excl_min", type=float, default=0.0,
+                        help="Only exclude pixels with total_std > this value")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -551,4 +574,4 @@ if __name__ == "__main__":
         sweep_r = DEFAULT_SWEEP
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
-             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r)
+             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min)
