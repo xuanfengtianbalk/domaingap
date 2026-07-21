@@ -386,61 +386,59 @@ def _compute_excl_mask(c_np, center, radius_3, mode):
                     (c_np[ax] <= center[ax] + radius_3[ax])
     return mask
 
-
 def _plot_sweep(rows, out_dir, split):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    ratios = np.array([r["ratio"] for r in rows])
+    radii_uniq = sorted(set(r["radius"] for r in rows))
+    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(radii_uniq)))
+
+    shape_info = [
+        ("base", "o", "BASELINE"),
+        ("excl", "^", "EXCLUDED"),
+        ("corr", "s", "CORRECTED"),
+    ]
+
     for ykey, ylabel, fname in [
-        ("angle", "Angle Error (°)", "excl_ratio_vs_angle"),
+        ("angle", "Angle Error (deg)", "excl_ratio_vs_angle"),
         ("dist", "Distance Error", "excl_ratio_vs_dist"),
     ]:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        # BASELINE: constant reference line
-        base_vals = np.array([r[f"{ykey}_base"] for r in rows])
-        base_mean = np.nanmean(base_vals)
-        ax.axhline(base_mean, color="blue", linestyle="--", alpha=0.5,
-                   label=f"BASELINE ({base_mean:.2f})")
+        fig, ax = plt.subplots(figsize=(9, 5.5))
 
-        # EXCL scatter per radius bin (mean ± std)
-        radii_uniq = sorted(set(r["radius"] for r in rows))
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(radii_uniq)))
         for ki, rad in enumerate(radii_uniq):
             pts = [r for r in rows if r["radius"] == rad]
-            rr = np.array([r["ratio"] for r in pts])
-            ee = np.array([r[f"{ykey}_excl"] for r in pts])
-            ee = ee[np.isfinite(ee)]
-            if len(ee) < 2:
-                continue
-            ax.scatter(rr, ee, s=8, color=colors[ki], alpha=0.5)
-            ax.plot(np.nanmean(rr), np.nanmean(ee), "o", color=colors[ki],
-                    markersize=8, label=f"r={rad:.2f}")
-
-        # CORR (if present)
-        corr_vals = [r["angle_corr"] for r in rows if not math.isnan(r["angle_corr"])]
-        if corr_vals:
-            for ki, rad in enumerate(radii_uniq):
-                pts = [r for r in rows if r["radius"] == rad]
+            for mode, marker, label in shape_info:
                 rr = np.array([r["ratio"] for r in pts])
-                cc = np.array([r[f"{ykey}_corr"] for r in pts])
-                cc = cc[np.isfinite(cc)]
-                if len(cc) < 2:
+                vv = np.array([r[f"{ykey}_{mode}"] for r in pts])
+                vv = vv[np.isfinite(vv)]
+                if len(vv) < 2:
                     continue
-                ax.plot(np.nanmean(rr), np.nanmean(cc), "s", color=colors[ki],
-                        markersize=8, markerfacecolor="none")
+                ax.scatter(rr, vv, s=10, color=colors[ki], marker=marker, alpha=0.4)
+                ax.plot(np.nanmean(rr), np.nanmean(vv), marker, color=colors[ki],
+                        markersize=10, markeredgecolor="black", markeredgewidth=0.5)
+
+        from matplotlib.lines import Line2D
+        shape_leg = [Line2D([0], [0], marker=m, color="gray", linestyle="none", markersize=8, label=l)
+                     for _, m, l in shape_info]
+        leg1 = ax.legend(handles=shape_leg, fontsize=7, loc="lower left")
+        ax.add_artist(leg1)
+
+        pick_r = [0, len(radii_uniq)//4, len(radii_uniq)//2, 3*len(radii_uniq)//4, len(radii_uniq)-1]
+        color_leg = [Line2D([0], [0], marker="o", color=colors[i], linestyle="none", markersize=8,
+                            label=f"r={radii_uniq[i]:.2f}") for i in pick_r if i < len(radii_uniq)]
+        leg2 = ax.legend(handles=color_leg, fontsize=7, loc="lower right")
+        ax.add_artist(leg2)
 
         ax.set_xlabel("Exclusion ratio")
         ax.set_ylabel(ylabel)
         ax.set_title(f"{split}: {ylabel} vs exclusion ratio")
-        ax.legend(fontsize=6, ncol=3, loc="upper left")
         ax.grid(True, alpha=0.2)
         plt.tight_layout()
         save_path = os.path.join(out_dir, f"{split}_{fname}.png")
         plt.savefig(save_path, dpi=200)
         plt.close()
-        print(f"  → {save_path}")
+        print(f"  -> {save_path}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -451,7 +449,7 @@ if __name__ == "__main__":
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=10000)
+    parser.add_argument("--max_samples", type=int, default=300)
     parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
@@ -459,12 +457,12 @@ if __name__ == "__main__":
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
     parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
-    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
-    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
-    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
+    parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
-    parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
+    parser.add_argument("--excl_mode", choices=["and", "or"], default="and",
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
@@ -476,7 +474,7 @@ if __name__ == "__main__":
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
-    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15, 0.10, 0.15, 0.20, 0.25, 0.3, 0.35]
+    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15]
     if args.no_sweep:
         sweep_r = None
     elif args.excl_sweep_r:
