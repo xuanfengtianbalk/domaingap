@@ -188,8 +188,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
 
         if do_sweep:
-            _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_mode,
-                       corr_excl, excl_sweep_r, out_dir, split, device)
+            _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
+                       corr_excl, sweep_r, out_dir, split, device)
             continue
 
         base_angles, base_dists = [], []
@@ -304,9 +304,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
 # ── exclusion ratio sweep ─────────────────────────────────────────────────────
 
-def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_mode,
+def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
                corr_excl, sweep_r, out_dir, split, device):
-    """Sweep over exclusion radii, collecting ratio vs PnP error."""
+    """Sweep over exclusion radii — PnP runs once per image, only ratio varies."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -322,41 +322,38 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_mode,
         with torch.no_grad(), torch.amp.autocast("cuda"):
             outputs_raw = model(image)
 
-        # BASELINE (once per image)
-        angle_base, dist_base, _ = run_pnp(outputs_raw, gtbbox, qgt, rgt)
-
         c_np_full = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
         total_valid = np.isfinite(c_np_full[0]).sum()
 
+        # ── BASELINE ──
+        angle_base, dist_base, _ = run_pnp(outputs_raw, gtbbox, qgt, rgt)
+
+        # ── EXCLUDED (standard excl_radius) ──
+        mask_std = _compute_excl_mask(c_np_full, excl_center, excl_radius, excl_mode)
+        c_excl_std = c_np_full.copy()
+        c_excl_std[:, mask_std] = float("nan")
+        outputs_excl_std = dict(outputs_raw)
+        outputs_excl_std["c"] = torch.from_numpy(c_excl_std).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
+        angle_excl, dist_excl, _ = run_pnp(outputs_excl_std, gtbbox, qgt, rgt)
+
+        # ── CORRECTED ──
+        if corr_excl:
+            raw_for_alpha = outputs_excl_std
+        else:
+            raw_for_alpha = outputs_raw
+        coords_corr, _ = correct_coords(
+            raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
+            raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
+            alpha_table, std_min, std_max)
+        outputs_corr_std = dict(outputs_raw)
+        outputs_corr_std["c"] = coords_corr
+        angle_corr, dist_corr, _ = run_pnp(outputs_corr_std, gtbbox, qgt, rgt)
+
+        # ── Sweep: ratio only ──
         for radius in sweep_r:
             r3 = (radius, radius, radius)
             mask = _compute_excl_mask(c_np_full, excl_center, r3, excl_mode)
             ratio = float(mask.sum()) / total_valid if total_valid > 0 else 0.0
-
-            c_excl = c_np_full.copy()
-            c_excl[:, mask] = float("nan")
-            c_excl_t = torch.from_numpy(c_excl).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
-
-            outputs_excl = dict(outputs_raw)
-            outputs_excl["c"] = c_excl_t
-            angle_excl, dist_excl, _ = run_pnp(outputs_excl, gtbbox, qgt, rgt)
-
-            # CORRECTED
-            if corr_excl:
-                raw_for_alpha = dict(outputs_raw)
-                raw_for_alpha["c"] = c_excl_t
-            else:
-                raw_for_alpha = outputs_raw
-
-            coords_corr, _ = correct_coords(
-                raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
-                raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
-                alpha_table, std_min, std_max)
-
-            outputs_corr = dict(outputs_raw)
-            outputs_corr["c"] = coords_corr
-            angle_corr, dist_corr, _ = run_pnp(outputs_corr, gtbbox, qgt, rgt)
-
             rows.append({
                 "radius": radius, "ratio": ratio,
                 "angle_base": angle_base, "angle_excl": angle_excl, "angle_corr": angle_corr,
@@ -479,7 +476,7 @@ if __name__ == "__main__":
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
-    DEFAULT_SWEEP = [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15, 0.10, 0.15, 0.20, 0.25, 0.3, 0.35]
     if args.no_sweep:
         sweep_r = None
     elif args.excl_sweep_r:
