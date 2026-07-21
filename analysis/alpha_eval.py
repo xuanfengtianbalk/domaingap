@@ -181,7 +181,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
     model.eval()
 
     has_excl = excl_center is not None and excl_radius is not None
-    do_sweep = excl_sweep_r is not None and len(excl_sweep_r) > 0 and excl_center is not None
+    do_sweep = sweep_r is not None and len(sweep_r) > 0 and excl_center is not None
 
     for split in splits:
         print(f"\n=== {split} ===")
@@ -471,12 +471,21 @@ if __name__ == "__main__":
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
+    parser.add_argument("--no_sweep", action="store_true", default=False,
+                        help="Disable radius sweep, use standard single-excl mode")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
-    sweep_r = args.excl_sweep_r if args.excl_sweep_r else None
+
+    DEFAULT_SWEEP = [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+    if args.no_sweep:
+        sweep_r = None
+    elif args.excl_sweep_r:
+        sweep_r = args.excl_sweep_r
+    else:
+        sweep_r = DEFAULT_SWEEP
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
              args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r)
