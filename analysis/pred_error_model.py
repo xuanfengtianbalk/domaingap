@@ -432,7 +432,7 @@ def main():
                 "n": int(keep.sum()), "pct_excluded": pct_excluded,
             })
 
-    # ── plot ──
+    #     # ── plot R² vs radius ──
     colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
     fig, ax = plt.subplots(figsize=(8, 4.5))
     for ax_name in ["x", "y", "z"]:
@@ -440,15 +440,38 @@ def main():
         pts.sort(key=lambda r: r["radius"])
         rr, r2 = [r["radius"] for r in pts], [r["r2"] for r in pts]
         ax.plot(rr, r2, "o-", color=colors[ax_name], markersize=5, label=ax_name)
-
     ax.set_xlabel("Exclusion radius"); ax.set_ylabel("R²")
     ax.set_title("R²(std→error) vs exclusion radius")
     ax.legend(); ax.grid(True, alpha=0.2)
     plt.tight_layout()
-    save_path = os.path.join(OUT_DIR, "std_vs_error_sweep.png")
-    plt.savefig(save_path, dpi=200)
+    plt.savefig(os.path.join(OUT_DIR, "std_vs_error_sweep.png"), dpi=200)
     plt.close()
-    print(f"  -> {save_path}")
+
+    # ── std vs error scatter per exclusion radius ──
+    pick_r = [0, 0.05, 0.15]
+    fig, axes = plt.subplots(3, len(pick_r), figsize=(4*len(pick_r), 10))
+    for ri, (ax_name, ax_idx) in enumerate([("x", 0), ("y", 1), ("z", 2)]):
+        pred = data["pred"][:, ax_idx]
+        gt   = data["gt"][:, ax_idx]
+        ts   = data["ts"][:, ax_idx]
+        error = np.abs(pred - gt)
+        cx = center[ax_name]
+        for ci, r in enumerate(pick_r):
+            ax = axes[ri, ci]
+            keep = np.abs(pred - cx) >= r
+            n_draw = min(10000, keep.sum())
+            idx = np.where(keep)[0]
+            if len(idx) > n_draw:
+                idx = np.random.choice(idx, n_draw, replace=False)
+            ax.scatter(ts[idx], error[idx], s=1, alpha=0.3, color="#1f77b4", rasterized=True)
+            ax.set_xlabel("total_std"); ax.set_ylabel(f"|error_{ax_name}|")
+            ax.set_title(f"{ax_name} r≥{r}")
+            ax.set_xscale("log"); ax.set_yscale("log")
+            ax.grid(True, alpha=0.15)
+    fig.suptitle("std vs error at different exclusion levels")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "std_vs_error_scatter.png"), dpi=200)
+    plt.close()
 
     with open(os.path.join(OUT_DIR, "std_vs_error_sweep.json"), "w") as f:
         json.dump({"sweep_r": sweep_r, "rows": rows_all}, f, indent=2)
