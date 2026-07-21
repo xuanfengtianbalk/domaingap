@@ -447,30 +447,42 @@ def main():
     plt.savefig(os.path.join(OUT_DIR, "std_vs_error_sweep.png"), dpi=200)
     plt.close()
 
-    # ── std vs error scatter per exclusion radius ──
-    pick_r = [0, 0.05, 0.15]
-    fig, axes = plt.subplots(3, len(pick_r), figsize=(4*len(pick_r), 10))
+    # ── std vs error by distance-from-center interval ──
+    intervals = [(0, 0.02), (0.02, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, np.inf)]
+    n_intervals = len(intervals)
+
+    fig, axes = plt.subplots(3, n_intervals, figsize=(4*n_intervals, 10), sharex="col")
     for ri, (ax_name, ax_idx) in enumerate([("x", 0), ("y", 1), ("z", 2)]):
         pred = data["pred"][:, ax_idx]
         gt   = data["gt"][:, ax_idx]
         ts   = data["ts"][:, ax_idx]
         error = np.abs(pred - gt)
-        cx = center[ax_name]
-        for ci, r in enumerate(pick_r):
+        dist  = np.abs(pred - center[ax_name])
+
+        for ci, (dlo, dhi) in enumerate(intervals):
             ax = axes[ri, ci]
-            keep = np.abs(pred - cx) >= r
-            n_draw = min(10000, keep.sum())
+            keep = (dist >= dlo) & (dist < dhi)
+            n_draw = min(8000, keep.sum())
             idx = np.where(keep)[0]
+            if len(idx) < 10:
+                continue
             if len(idx) > n_draw:
                 idx = np.random.choice(idx, n_draw, replace=False)
             ax.scatter(ts[idx], error[idx], s=1, alpha=0.3, color="#1f77b4", rasterized=True)
-            ax.set_xlabel("total_std"); ax.set_ylabel(f"|error_{ax_name}|")
-            ax.set_title(f"{ax_name} r≥{r}")
+            if dhi == np.inf:
+                label = f"d≥{dlo:.2f}"
+            else:
+                label = f"d∈[{dlo:.2f},{dhi:.2f})"
+            ax.set_title(f"{ax_name} {label}")
             ax.set_xscale("log"); ax.set_yscale("log")
             ax.grid(True, alpha=0.15)
-    fig.suptitle("std vs error at different exclusion levels")
+            ax.set_xlabel("total_std")
+            if ci == 0:
+                ax.set_ylabel(f"|error_{ax_name}|")
+
+    fig.suptitle("std vs error by pred-to-center distance")
     plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "std_vs_error_scatter.png"), dpi=200)
+    plt.savefig(os.path.join(OUT_DIR, "std_vs_error_intervals.png"), dpi=200)
     plt.close()
 
     with open(os.path.join(OUT_DIR, "std_vs_error_sweep.json"), "w") as f:
