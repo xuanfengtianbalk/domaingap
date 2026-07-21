@@ -123,21 +123,14 @@ def run_pls(axis_data: dict, axis_name: str, plot: bool = True):
 
     X = axis_data["X"]
     y = axis_data["y"]
-    scaler_X = StandardScaler()
-    scaler_y = StandardScaler()
-    X_s = scaler_X.fit_transform(X)
-    y_s = scaler_y.fit_transform(y.reshape(-1, 1)).ravel()
 
     pls = PLSRegression(n_components=2)
-    pls.fit(X_s, y_s)
-    y_pred_s = pls.predict(X_s).ravel()
-    y_pred = scaler_y.inverse_transform(y_pred_s.reshape(-1, 1)).ravel()
+    pls.fit(X, y)
+    y_pred = pls.predict(X).ravel()
 
     r2 = float(1 - ((y - y_pred) ** 2).sum() / ((y - y.mean()) ** 2).sum())
     rmse = float(np.sqrt(((y - y_pred) ** 2).mean()))
     mae  = float(np.abs(y - y_pred).mean())
-    coef = pls.coef_.reshape(-1)
-
     coef = pls.coef_.reshape(-1)
 
     if plot:
