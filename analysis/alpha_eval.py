@@ -196,6 +196,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         excl_angles, excl_dists = [], []   # DER + exclusion filter
         corr_angles, corr_dists = [], []    # alpha corrected
         per_image = []
+        # per-pixel pred vs std collection (sampled)
+        std_preds, std_ts, std_epi, std_alea = [], [], [], []
 
         has_excl = excl_center is not None and excl_radius is not None
 
@@ -261,6 +263,28 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 corr_angles.append(angle_corr)
                 corr_dists.append(dist_corr)
 
+            # sample pixels for pred vs std plot (max ~5000 per image)
+            c_np = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
+            logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+            loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+            logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+            a_np = np.exp(loga) + 1.0 + 1e-6
+            b_np = np.exp(logb) + 1e-6
+            v_np = np.exp(logl) + 1e-6
+            epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+            alea_var = b_np / (a_np - 1 + 1e-12)
+            total_std = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+            epi_std    = np.sqrt(np.maximum(epi_var, 0.0))
+            alea_std   = np.sqrt(np.maximum(alea_var, 0.0))
+            n_pix = c_np.shape[1] * c_np.shape[2]
+            take = min(n_pix, 5000)
+            idx = np.random.choice(n_pix, take, replace=False)
+            for ax in range(3):
+                std_preds.append(c_np[ax].ravel()[idx])
+                std_ts.append(total_std[ax].ravel()[idx])
+                std_epi.append(epi_std[ax].ravel()[idx])
+                std_alea.append(alea_std[ax].ravel()[idx])
+
             per_image.append({
                 "angle_base": angle_base, "dist_base": dist_base,
                 "angle_excl": angle_excl, "dist_excl": dist_excl,
@@ -300,6 +324,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         if has_excl:
             print(f"  EXCLUDED:   angle={result['EXCLUDED']['angle']['mean']:.2f}° ± {result['EXCLUDED']['angle']['std']:.2f}  dist={result['EXCLUDED']['dist']['mean']:.4f}  n={result['EXCLUDED']['angle']['n']}")
         print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
+
+        # pred vs std plot
+        if len(std_preds) > 0:
+            _plot_pred_vs_std(std_preds, std_ts, std_epi, std_alea, out_dir, split)
 
 
 # ── exclusion ratio sweep ─────────────────────────────────────────────────────
@@ -439,6 +467,47 @@ def _plot_sweep(rows, out_dir, split):
         print(f"  -> {save_path}")
 
 
+def _plot_pred_vs_std(std_preds, std_ts, std_epi, std_alea, out_dir, split):
+    """9-panel scatter: rows=(total, epi, alea) x cols=(x, y, z), x=pred, y=std."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pred = np.concatenate(std_preds)  # flat array: x then y then z
+    ts   = np.concatenate(std_ts)
+    epi  = np.concatenate(std_epi)
+    alea = np.concatenate(std_alea)
+    n_total = len(pred)
+    n_per_ax = n_total // 3
+
+    axis_names = ["x", "y", "z"]
+    std_sets = [("total", ts), ("epistemic", epi), ("aleatoric", alea)]
+
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12), sharex="col", sharey="row")
+    for ri, (std_name, std_arr) in enumerate(std_sets):
+        for ci, ax_name in enumerate(axis_names):
+            ax = axes[ri, ci]
+            ax_idx = ci
+            px = pred[ax_idx::3]
+            sy = std_arr[ax_idx::3]
+            # subsample to 20k for performance
+            if len(px) > 20000:
+                ii = np.random.choice(len(px), 20000, replace=False)
+                px = px[ii]; sy = sy[ii]
+            ax.scatter(px, sy, s=1, alpha=0.3, color="#1f77b4", rasterized=True)
+            if ri == 2:
+                ax.set_xlabel(f"pred_{ax_name}")
+            if ci == 0:
+                ax.set_ylabel(f"{std_name} std")
+            ax.grid(True, alpha=0.15)
+    fig.suptitle(f"{split}: prediction vs uncertainty (rows=total/epistemic/aleatoric, cols=x/y/z)", fontsize=12)
+    plt.tight_layout()
+    save_path = os.path.join(out_dir, f"{split}_pred_vs_std.png")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"  -> {save_path}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -472,7 +541,8 @@ if __name__ == "__main__":
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
-    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15,0.2]
+    # DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15,0.2]
+    DEFAULT_SWEEP = [0.10, 0.15,0.2, 0.25,0.3]
     if args.no_sweep:
         sweep_r = None
     elif args.excl_sweep_r:
