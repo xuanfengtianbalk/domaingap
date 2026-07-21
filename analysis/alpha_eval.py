@@ -415,8 +415,6 @@ def _plot_sweep(rows, out_dir, split):
                 if len(vv) < 2:
                     continue
                 ax.scatter(rr, vv, s=10, color=colors[ki], marker=marker, alpha=0.4)
-                ax.plot(np.nanmean(rr), np.nanmean(vv), marker, color=colors[ki],
-                        markersize=10, markeredgecolor="black", markeredgewidth=0.5)
 
         from matplotlib.lines import Line2D
         shape_leg = [Line2D([0], [0], marker=m, color="gray", linestyle="none", markersize=8, label=l)
@@ -474,7 +472,7 @@ if __name__ == "__main__":
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
-    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15]
+    DEFAULT_SWEEP = [0.02, 0.05, 0.10, 0.15,0.2]
     if args.no_sweep:
         sweep_r = None
     elif args.excl_sweep_r:
