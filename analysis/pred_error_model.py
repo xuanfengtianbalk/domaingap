@@ -1,9 +1,9 @@
-"""pred_error_model.py — PCA + PLS analysis: model error from (total_std, pred_x/y/z).
+"""pred_error_model.py — PCA + PLS: error ~ f(total_std, pred_x, pred_y, pred_z).
 
-Finds the relationship between predictive uncertainty, prediction position, and error.
-PCA: dimensionality check.  PLS: regression model for error prediction.
-
-Run: python pred_error_model.py --alpha_csv outputs/alpha_cali/alpha_cali.csv
+Two modes:
+  1. --save_npz        collect raw per-pixel 3D data from validation
+  2. --raw_npz FILE    4D PLS + 3D exclusion sweep on saved pixels
+  3. --alpha_csv FILE  legacy per-axis analysis from CSV (fallback)
 """
 
 from __future__ import annotations
@@ -13,116 +13,140 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "dinov3_main"))
 OUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "pred_error_model")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
-def load_data(csv_path: str, max_samples: int | None = None) -> tuple:
-    """Load per-cell data from alpha_cali.csv. Returns (X, y, axis_labels)."""
-    rows = list(csv.DictReader(open(csv_path)))
-    if max_samples and len(rows) > max_samples:
-        # Weighted sampling by cell n
-        weights = np.array([int(r["n"]) for r in rows], dtype=float)
-        weights /= weights.sum()
-        idx = np.random.choice(len(rows), max_samples, replace=False, p=weights)
-        rows = [rows[i] for i in idx]
+# ── raw pixel collection ──────────────────────────────────────────────────────
 
-    features = []
-    targets = []
-    for r in rows:
-        if int(r["n"]) < 5:
+def collect_raw_pixels(uuid: str, max_samples: int, device: str, save_path: str):
+    """Load DER model, run validation inference, save per-pixel 3D data."""
+    import torch
+    from analysis_utils import load_model, build_dataloader, get_model_type_from_traininfo
+    from tqdm import tqdm
+
+    mt, bb = get_model_type_from_traininfo(uuid)
+    model, bc = load_model(uuid, mt[0], bb, device)
+    model.eval()
+
+    dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
+
+    MAX_TOTAL_PIX = 500_000
+    all_pred, all_gt, all_ts, all_epi, all_alea = [], [], [], [], []
+    n_collected = 0
+
+    for samples, targets in tqdm(dl, desc="Collecting pixels", ncols=80):
+        if n_collected >= MAX_TOTAL_PIX:
+            break
+        image = samples.to(device)
+        mask = targets["mask_gt"][0] > 0.5
+        gt = targets["coors_gt"][0].numpy()  # (3, H, W)
+
+        with torch.no_grad(), torch.amp.autocast("cuda"):
+            outputs = model(image)
+
+        pred = outputs["c"].squeeze(0).cpu().numpy()  # (3, H, W)
+        logl = outputs["logl"].squeeze(0).cpu().numpy()
+        loga = outputs["loga"].squeeze(0).cpu().numpy()
+        logb = outputs["logb"].squeeze(0).cpu().numpy()
+        a = np.exp(loga) + 1.0 + 1e-6
+        b = np.exp(logb) + 1e-6
+        v = np.exp(logl) + 1e-6
+        epi_var = b / ((a - 1 + 1e-12) * (v + 1e-12))
+        alea_var = b / (a - 1 + 1e-12)
+        ts_total = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+        ts_epi   = np.sqrt(np.maximum(epi_var, 0.0))
+        ts_alea  = np.sqrt(np.maximum(alea_var, 0.0))
+
+        valid_idx = np.where(mask.numpy().ravel())[0]
+        if len(valid_idx) == 0:
             continue
-        features.append([
-            float(r["mean_total_std"]),
-            float(r["mean_pred"]),
-        ])
-        gt = float(r["mean_GT"])
-        pred = float(r["mean_pred"])
-        targets.append(abs(pred - gt))
+        n_take = min(500, len(valid_idx))
+        idx = np.random.choice(valid_idx, n_take, replace=False)
 
-    X = np.array(features)    # (N, 2): [total_std, pred]
-    y = np.array(targets)     # (N,): |pred - GT|
-    return X, y
+        for ax in range(3):
+            flat = pred[ax].ravel()
+            all_pred.append(flat[idx])
+            all_gt.append(gt[ax].ravel()[idx])
+            all_ts.append(ts_total[ax].ravel()[idx])
+            all_epi.append(ts_epi[ax].ravel()[idx])
+            all_alea.append(ts_alea[ax].ravel()[idx])
+        n_collected += n_take
+
+    pred_3d = np.column_stack([np.concatenate(all_pred[0::3]),
+                                np.concatenate(all_pred[1::3]),
+                                np.concatenate(all_pred[2::3])]).T  # (3, N)
+    gt_3d   = np.column_stack([np.concatenate(all_gt[0::3]),
+                                np.concatenate(all_gt[1::3]),
+                                np.concatenate(all_gt[2::3])]).T
+    ts_3d   = np.column_stack([np.concatenate(all_ts[0::3]),
+                                np.concatenate(all_ts[1::3]),
+                                np.concatenate(all_ts[2::3])]).T
+    epi_3d  = np.column_stack([np.concatenate(all_epi[0::3]),
+                                np.concatenate(all_epi[1::3]),
+                                np.concatenate(all_epi[2::3])]).T
+    alea_3d = np.column_stack([np.concatenate(all_alea[0::3]),
+                                np.concatenate(all_alea[1::3]),
+                                np.concatenate(all_alea[2::3])]).T
+
+    np.savez(save_path, pred=pred_3d, gt=gt_3d, ts=ts_3d, epi=epi_3d, alea=alea_3d)
+    print(f"  saved {pred_3d.shape[1]} pixels → {save_path}")
 
 
-def load_per_axis(csv_path: str, axis: str, max_samples: int | None = None) -> dict:
-    """Load data for one axis. Returns {std, pred, error, X, y}."""
-    rows = list(csv.DictReader(open(csv_path)))
-    ax_rows = [r for r in rows if r["axis"] == axis and int(r["n"]) >= 5]
-    if max_samples and len(ax_rows) > max_samples:
-        weights = np.array([int(r["n"]) for r in ax_rows], dtype=float)
-        weights /= weights.sum()
-        idx = np.random.choice(len(ax_rows), max_samples, replace=False, p=weights)
-        ax_rows = [ax_rows[i] for i in idx]
+# ── raw data loader ───────────────────────────────────────────────────────────
 
-    stds = np.array([float(r["mean_total_std"]) for r in ax_rows])
-    preds = np.array([float(r["mean_pred"]) for r in ax_rows])
-    gts = np.array([float(r["mean_GT"]) for r in ax_rows])
-    errors = np.abs(preds - gts)
-    X = np.column_stack([stds, preds])
-    return {"std": stds, "pred": preds, "error": errors, "X": X, "y": errors, "rows": ax_rows}
+def load_raw_data(npz_path: str, max_samples: int | None = None) -> dict:
+    """Load raw pixel data. Returns dict with pred(N,3), gt(N,3), ts(N,3), etc."""
+    d = np.load(npz_path)
+    keys = list(d.keys())
+    N = d["pred"].shape[1]  # (3, N)
+    if max_samples and N > max_samples:
+        idx = np.random.choice(N, max_samples, replace=False)
+    else:
+        idx = slice(None)
 
-
-# ── PCA ──────────────────────────────────────────────────────────────────────
-
-def run_pca(axis_data: dict, axis_name: str):
-    from sklearn.decomposition import PCA
-    from sklearn.preprocessing import StandardScaler
-
-    X = axis_data["X"]
-    y = axis_data["y"]
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    pca = PCA(n_components=2)
-    X_pca = pca.fit_transform(X_scaled)
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-
-    # variance explained
-    axes[0].bar(range(1, 3), pca.explained_variance_ratio_, color=["#1f77b4", "#ff7f0e"])
-    axes[0].set_xticks([1, 2])
-    axes[0].set_xticklabels(["PC1", "PC2"])
-    axes[0].set_ylabel("Explained variance ratio")
-    axes[0].set_title(f"GT_{axis_name}: PCA variance")
-
-    # loadings
-    axes[1].barh(["total_std", f"pred_{axis_name}"], pca.components_[0], color="#1f77b4", alpha=0.7, label="PC1")
-    axes[1].barh(["total_std", f"pred_{axis_name}"], pca.components_[1], color="#ff7f0e", alpha=0.5, label="PC2")
-    axes[1].set_title("PCA loadings")
-    axes[1].legend(fontsize=7)
-
-    # error vs PC1
-    axes[2].scatter(X_pca[:, 0], y, s=2, alpha=0.3, color="#1f77b4")
-    axes[2].set_xlabel("PC1")
-    axes[2].set_ylabel("|error|")
-    axes[2].set_title("Error vs PC1")
-    axes[2].grid(True, alpha=0.15)
-
-    fig.suptitle(f"PCA analysis — GT_{axis_name}")
-    plt.tight_layout()
-    save_path = os.path.join(OUT_DIR, f"pca_{axis_name}.png")
-    plt.savefig(save_path, dpi=200)
-    plt.close()
-
-    result = {
-        "axis": axis_name,
-        "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
-        "pc1_loadings": {"total_std": float(pca.components_[0, 0]), f"pred_{axis_name}": float(pca.components_[0, 1])},
-        "pc2_loadings": {"total_std": float(pca.components_[1, 0]), f"pred_{axis_name}": float(pca.components_[1, 1])},
+    data = {
+        "pred": d["pred"][:, idx].T,     # (N, 3)
+        "gt":   d["gt"][:, idx].T,
+        "ts":   d["ts"][:, idx].T,
     }
-    print(f"  PCA {axis_name}: PC1={pca.explained_variance_ratio_[0]:.3f}, PC2={pca.explained_variance_ratio_[1]:.3f}")
-    print(f"    PC1 loadings: std={result['pc1_loadings']['total_std']:.3f}, pred={result['pc1_loadings'][f'pred_{axis_name}']:.3f}")
-    return result
+    if "epi" in keys:
+        data["epi"] = d["epi"][:, idx].T
+        data["alea"] = d["alea"][:, idx].T
+    data["error_l2"] = np.linalg.norm(data["pred"] - data["gt"], axis=1)
+    data["ts_scalar"] = np.sqrt((data["ts"] ** 2).sum(axis=1))
+    return data
 
 
-# ── PLS ──────────────────────────────────────────────────────────────────────
+# ── 4D PLS ────────────────────────────────────────────────────────────────────
 
-def run_pls(axis_data: dict, axis_name: str, plot: bool = True):
+def run_pls_4d(data: dict, sweep_r: float | None = None,
+               excl_center: tuple = None, plot: bool = True, label: str = ""):
     from sklearn.cross_decomposition import PLSRegression
-    from sklearn.preprocessing import StandardScaler
 
-    X = axis_data["X"]
-    y = axis_data["y"]
+    pred = data["pred"]
+    error = data["error_l2"]
+    ts_s  = data["ts_scalar"]
+    N = len(error)
+
+    if sweep_r is not None and excl_center is not None:
+        keep = np.ones(N, dtype=bool)
+        for ax in range(3):
+            keep &= np.abs(pred[:, ax] - excl_center[ax]) >= sweep_r
+        pred = pred[keep]
+        error = error[keep]
+        ts_s = ts_s[keep]
+        pct_excluded = float(1 - keep.mean()) * 100
+    else:
+        pct_excluded = 0.0
+
+    if len(error) < 10:
+        return None
+
+    X = np.column_stack([ts_s, pred[:, 0], pred[:, 1], pred[:, 2]])
+    y = error
 
     pls = PLSRegression(n_components=2)
     pls.fit(X, y)
@@ -138,131 +162,161 @@ def run_pls(axis_data: dict, axis_name: str, plot: bool = True):
         axes[0].scatter(y, y_pred, s=2, alpha=0.3, color="#1f77b4")
         mx = max(y.max(), y_pred.max())
         axes[0].plot([0, mx], [0, mx], "k--", alpha=0.3)
-        axes[0].set_xlabel("True |error|")
-        axes[0].set_ylabel("Predicted |error|")
-        axes[0].set_title(f"R2={r2:.3f} RMSE={rmse:.4f} MAE={mae:.4f}")
+        axes[0].set_xlabel("True L2 error")
+        axes[0].set_ylabel("Predicted L2 error")
+        axes[0].set_title(f"R²={r2:.3f} RMSE={rmse:.4f} MAE={mae:.4f}")
         axes[0].grid(True, alpha=0.15)
 
-        imp = np.abs(coef)
-        axes[1].bar(["total_std", f"pred_{axis_name}"], imp, color=["#1f77b4", "#ff7f0e"])
+        names = ["total_std", "pred_x", "pred_y", "pred_z"]
+        axes[1].bar(names, np.abs(coef), color=["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c"])
         axes[1].set_ylabel("|coefficient|")
         axes[1].set_title("PLS feature importance")
+        plt.xticks(rotation=30, fontsize=8)
 
-        fig.suptitle(f"PLS regression — GT_{axis_name}")
+        title = "PLS regression (4D)" + (f" — {label}" if label else "")
+        fig.suptitle(title)
         plt.tight_layout()
-        save_path = os.path.join(OUT_DIR, f"pls_{axis_name}.png")
+        save_path = os.path.join(OUT_DIR, f"pls_4d{'_'+label if label else ''}.png")
         plt.savefig(save_path, dpi=200)
         plt.close()
 
-        print(f"  PLS {axis_name}: R2={r2:.3f} RMSE={rmse:.4f} MAE={mae:.4f}")
     result = {
-        "axis": axis_name,
-        "n_samples": len(y),
-        "r2": r2, "rmse": rmse, "mae": mae,
-        "coefficients": {"total_std": float(coef[0]), f"pred_{axis_name}": float(coef[1]) if len(coef) > 1 else 0.0},
+        "r2": r2, "rmse": rmse, "mae": mae, "n_samples": len(y),
+        "pct_excluded": pct_excluded,
+        "coeff": {n: float(coef[i]) for i, n in enumerate(["total_std", "pred_x", "pred_y", "pred_z"]) if i < len(coef)},
     }
-    print(f"  PLS {axis_name}: R2={r2:.3f} RMSE={rmse:.4f} MAE={mae:.4f}")
     return result
 
 
-# ── main ─────────────────────────────────────────────────────────────────────
+# ── 4D PCA ────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="PCA + PLS analysis: error ~ f(std, pred)")
-    parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
-    parser.add_argument("--max_samples", type=int, default=200000)
-    parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
-    parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
-    parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
-    parser.add_argument("--sweep_r", nargs="*", type=float,
-                        default=[0.10, 0.15, 0.20, 0.25, 0.30],
-                        help="Exclusion radius sweep values")
-    parser.add_argument("--skip_sweep", action="store_true", help="Skip exclusion sweep")
-    args = parser.parse_args()
+def run_pca_4d(data: dict):
+    from sklearn.decomposition import PCA
+    pred = data["pred"]
+    ts_s = data["ts_scalar"]
+    X = np.column_stack([ts_s, pred[:, 0], pred[:, 1], pred[:, 2]])
+    pca = PCA(n_components=4)
+    X_pca = pca.fit_transform(X)
 
-    center_map = {"x": args.excl_cx, "y": args.excl_cy, "z": args.excl_cz}
-    sweep_r = args.sweep_r
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    axes[0].bar(range(1, 5), pca.explained_variance_ratio_, color=["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c"])
+    axes[0].set_xticks([1, 2, 3, 4])
+    axes[0].set_ylabel("Explained variance ratio")
+    axes[0].set_title("PCA variance explained")
 
-    print(f"Loading {args.alpha_csv} ...")
-    pca_results = {}
-    pls_results = {}
-    for axis_name in ["x", "y", "z"]:
-        data = load_per_axis(args.alpha_csv, axis_name, args.max_samples)
-        if len(data["y"]) < 10:
-            print(f"  {axis_name}: insufficient data, skip")
-            continue
-        pca_results[axis_name] = run_pca(data, axis_name)
-        pls_results[axis_name] = run_pls(data, axis_name)
+    names = ["total_std", "pred_x", "pred_y", "pred_z"]
+    for ci in range(2):
+        axes[1+ci].barh(names, pca.components_[ci], color=["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c"])
+        axes[1+ci].set_title(f"PC{ci+1} loadings")
 
-    # ── exclusion sweep ──
-    if not args.skip_sweep:
-        sweep_rows = []
-        for axis_name in ["x", "y", "z"]:
-            data = load_per_axis(args.alpha_csv, axis_name, args.max_samples)
-            center = center_map[axis_name]
-            for r in sweep_r:
-                keep = np.abs(data["pred"] - center) >= r
-                if keep.sum() < 10:
-                    continue
-                X_f = data["X"][keep]
-                y_f = data["y"][keep]
-                filt_data = {"X": X_f, "y": y_f, "pred": data["pred"][keep],
-                             "std": data["std"][keep], "error": y_f, "rows": None}
-                res = run_pls(filt_data, f"{axis_name}_r{r:.2f}", plot=False)
-                sweep_rows.append({
-                    "axis": axis_name, "radius": r,
-                    "r2": res["r2"], "rmse": res["rmse"], "mae": res["mae"],
-                    "coef_std": res["coefficients"].get("total_std", 0),
-                    "coef_pred": res["coefficients"].get(f"pred_{axis_name}", 0),
-                })
-                pct_excluded = float(1 - keep.mean()) * 100
-                print(f"  sweep {axis_name} r={r:.2f}: R2={res['r2']:.3f} rmse={res['rmse']:.4f} excluded={pct_excluded:.1f}%")
-
-        if sweep_rows:
-            _plot_sweep_pls(sweep_rows)
-            with open(os.path.join(OUT_DIR, "pls_sweep.json"), "w") as f:
-                json.dump({"metadata": {"alpha_csv": args.alpha_csv, "sweep_r": sweep_r},
-                           "rows": sweep_rows}, f, indent=2)
-
-    # save
-    meta = {"alpha_csv": args.alpha_csv, "max_samples": args.max_samples}
-    for fname, data in [("pca", pca_results), ("pls", pls_results)]:
-        path = os.path.join(OUT_DIR, f"{fname}_analysis.json")
-        with open(path, "w") as f:
-            json.dump({"metadata": meta, "results": data}, f, indent=2)
-        print(f"  -> {path}")
-
-
-def _plot_sweep_pls(rows):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
-    colors = {"x": "#1f77b4", "y": "#ff7f0e", "z": "#2ca02c"}
-
-    for ax, metric, ylabel in [
-        (axes[0], "r2", "R²"),
-        (axes[1], "coef_std", "PLS coeff (total_std)"),
-        (axes[2], "coef_pred", "PLS coeff (pred)"),
-    ]:
-        for axis_name in ["x", "y", "z"]:
-            pts = [r for r in rows if r["axis"] == axis_name]
-            pts.sort(key=lambda r: r["radius"])
-            rr = [r["radius"] for r in pts]
-            vv = [r[metric] for r in pts]
-            ax.plot(rr, vv, "o-", color=colors[axis_name], markersize=5, linewidth=1.2, label=axis_name)
-        ax.set_xlabel("Exclusion radius")
-        ax.set_ylabel(ylabel)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.2)
-
-    fig.suptitle("PLS performance vs exclusion radius")
+    fig.suptitle("PCA analysis (4D)")
     plt.tight_layout()
-    save_path = os.path.join(OUT_DIR, "pls_sweep.png")
+    save_path = os.path.join(OUT_DIR, "pca_4d.png")
     plt.savefig(save_path, dpi=200)
     plt.close()
+
+    return {
+        "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
+        "pc1": {n: float(pca.components_[0, i]) for i, n in enumerate(names)},
+        "pc2": {n: float(pca.components_[1, i]) for i, n in enumerate(names)},
+    }
+
+
+# ── 3D exclusion sweep ───────────────────────────────────────────────────────
+
+def run_sweep_4d(data: dict, excl_center: tuple, sweep_r: list):
+    rows = []
+    for r in sweep_r:
+        res = run_pls_4d(data, sweep_r=r, excl_center=excl_center, plot=False)
+        if res:
+            res["radius"] = r
+            rows.append(res)
+            print(f"  sweep r={r:.2f}: R²={res['r2']:.3f} rmse={res['rmse']:.4f} excluded={res['pct_excluded']:.1f}%")
+
+    if not rows:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    rr = [r["radius"] for r in rows]
+    axes[0].plot(rr, [r["r2"] for r in rows], "bo-", markersize=6)
+    axes[0].set_xlabel("Exclusion radius")
+    axes[0].set_ylabel("R²")
+    axes[0].set_title("PLS R² vs exclusion radius")
+    axes[0].grid(True, alpha=0.2)
+
+    names = ["total_std", "pred_x", "pred_y", "pred_z"]
+    colors = ["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c"]
+    for ni, name in enumerate(names):
+        coefs = [np.abs(r["coeff"].get(name, 0)) for r in rows]
+        axes[1].plot(rr, coefs, "o-", color=colors[ni], markersize=4, label=name)
+    axes[1].set_xlabel("Exclusion radius")
+    axes[1].set_ylabel("|coefficient|")
+    axes[1].set_title("PLS coefficient vs exclusion radius")
+    axes[1].legend(fontsize=7)
+    axes[1].grid(True, alpha=0.2)
+
+    fig.suptitle("PLS 4D: 3D exclusion sweep")
+    plt.tight_layout()
+    save_path = os.path.join(OUT_DIR, "pls_sweep_4d.png")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+    with open(os.path.join(OUT_DIR, "pls_sweep_4d.json"), "w") as f:
+        json.dump({"sweep_r": sweep_r, "rows": rows}, f, indent=2)
     print(f"  -> {save_path}")
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="PCA + PLS error model")
+    parser.add_argument("--save_npz", action="store_true", help="Collect & save raw per-pixel data")
+    parser.add_argument("--raw_npz", type=str, default=None, help="Raw pixel .npz for 4D analysis")
+    parser.add_argument("--alpha_csv", default=None, help="CSV for per-axis analysis (fallback)")
+    parser.add_argument("--uuid", default=None)
+    parser.add_argument("--max_samples", type=int, default=100)
+    parser.add_argument("--excl_cx", type=float, default=0.045)
+    parser.add_argument("--excl_cy", type=float, default=0.057)
+    parser.add_argument("--excl_cz", type=float, default=0.16)
+    parser.add_argument("--sweep_r", nargs="*", type=float,
+                        default=[0.10, 0.15, 0.20, 0.25, 0.30])
+    parser.add_argument("--device", default="cuda:0")
+    args = parser.parse_args()
+
+    # ── save_npz mode ──
+    if args.save_npz:
+        import yaml as _yaml
+        cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        with open(cfg_path) as f:
+            cfg = _yaml.safe_load(f)
+        uuid = args.uuid or cfg["pairwise"]["uuid_1"]
+        save_path = os.path.join(OUT_DIR, "alpha_cali_pixels.npz")
+        collect_raw_pixels(uuid, args.max_samples, args.device, save_path)
+        return
+
+    # ── raw_npz mode (4D analysis) ──
+    if args.raw_npz:
+        data = load_raw_data(args.raw_npz, args.max_samples * 500 if args.max_samples else None)
+        print(f"Loaded {data['pred'].shape[0]} pixels from {args.raw_npz}")
+
+        res_base = run_pls_4d(data, plot=True, label="all")
+        pca_res = run_pca_4d(data)
+
+        excl_center = (args.excl_cx, args.excl_cy, args.excl_cz)
+        run_sweep_4d(data, excl_center, args.sweep_r)
+
+        with open(os.path.join(OUT_DIR, "pls_4d.json"), "w") as f:
+            json.dump({"metadata": {"raw_npz": args.raw_npz}, "base": res_base,
+                       "pca": pca_res}, f, indent=2)
+        return
+
+    # ── legacy CSV mode ──
+    if args.alpha_csv is None:
+        print("No input specified. Use --save_npz, --raw_npz, or --alpha_csv.")
+        return
+
+    import legacy_csv as _lc
+    _lc.csv_main(args)
 
 
 if __name__ == "__main__":
