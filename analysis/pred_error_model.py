@@ -296,8 +296,11 @@ def main():
 
     # ── raw_npz mode (4D analysis) ──
     if args.raw_npz:
-        data = load_raw_data(args.raw_npz, args.max_samples * 500 if args.max_samples else None)
-        print(f"Loaded {data['pred'].shape[0]} pixels from {args.raw_npz}")
+        npz_path = args.raw_npz if os.path.isabs(args.raw_npz) else os.path.join(PROJECT_ROOT, args.raw_npz)
+        if not os.path.exists(npz_path):
+            npz_path = os.path.join(OUT_DIR, os.path.basename(args.raw_npz))
+        data = load_raw_data(npz_path, args.max_samples * 500 if args.max_samples else None)
+        print(f"Loaded {data['pred'].shape[0]} pixels from {npz_path}")
 
         res_base = run_pls_4d(data, plot=True, label="all")
         pca_res = run_pca_4d(data)
