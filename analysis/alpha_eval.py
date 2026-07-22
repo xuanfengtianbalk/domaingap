@@ -181,7 +181,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
     model.eval()
 
     has_excl = excl_center is not None and excl_radius is not None
-    do_sweep = sweep_r is not None and len(sweep_r) > 0 and excl_center is not None
+    do_sweep = excl_sweep_r is not None and len(excl_sweep_r) > 0 and excl_center is not None
 
     for split in splits:
         print(f"\n=== {split} ===")
@@ -189,7 +189,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
         if do_sweep:
             _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
-                       corr_excl, sweep_r, std_excl_min, out_dir, split, device)
+                       corr_excl, excl_sweep_r, std_excl_min, out_dir, split, device)
             continue
 
         base_angles, base_dists = [], []
@@ -411,13 +411,17 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radiu
         for radius in sweep_r:
             r3 = (radius, radius, radius)
             mask_c = _compute_excl_mask(c_np_full, excl_center, r3, excl_mode)
+            ct_ratio = float(mask_c.sum()) / total_valid if total_valid > 0 else 0.0
             if std_excl_min > 0:
                 mask = mask_c & (ts_scalar > std_excl_min)
             else:
                 mask = mask_c
-            ratio = float(mask.sum()) / total_valid if total_valid > 0 else 0.0
+            ct_std_ratio = float(mask.sum()) / total_valid if total_valid > 0 else 0.0
             rows.append({
-                "radius": radius, "ratio": ratio,
+                "radius": radius,
+                "ct_ratio": ct_ratio,
+                "ct_std_ratio": ct_std_ratio,
+                "excl_ratio": ct_std_ratio,
                 "angle_base": angle_base, "angle_excl": angle_excl, "angle_corr": angle_corr,
                 "dist_base": dist_base, "dist_excl": dist_excl, "dist_corr": dist_corr,
             })
@@ -471,7 +475,7 @@ def _plot_sweep(rows, out_dir, split):
         for ki, rad in enumerate(radii_uniq):
             pts = [r for r in rows if r["radius"] == rad]
             for mode, marker, label in shape_info:
-                rr = np.array([r["ratio"] for r in pts])
+                rr = np.array([r["excl_ratio"] for r in pts])
                 vv = np.array([r[f"{ykey}_{mode}"] for r in pts])
                 vv = vv[np.isfinite(vv)]
                 if len(vv) < 2:
@@ -558,22 +562,21 @@ if __name__ == "__main__":
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
     parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
-    parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion zone radius X")
-    parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion zone radius Y")
-    parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
+    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
-    parser.add_argument("--no_sweep", action="store_true", default=True,
+    parser.add_argument("--no_sweep", action="store_true", default=False,
                         help="Disable radius sweep, use standard single-excl mode")
-    parser.add_argument("--std_excl_min", type=float, default=0.1,
+    parser.add_argument("--std_excl_min", type=float, default=0.01,
                         help="Only exclude pixels with total_std > this value")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
     excl_radius = (args.excl_rx, args.excl_ry, args.excl_rz) if args.excl_cx is not None else None
 
