@@ -559,21 +559,24 @@ if __name__ == "__main__":
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
     parser.add_argument("--std_max", type=float, default=10.0,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
+    # parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
+    # parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
+    # parser.add_argument("--excl_cz", type=float, default=0.165, help="Exclusion zone center Z")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
     parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
-    parser.add_argument("--excl_rx", type=float, default=0.1, help="Exclusion zone radius X")
-    parser.add_argument("--excl_ry", type=float, default=0.1, help="Exclusion zone radius Y")
-    parser.add_argument("--excl_rz", type=float, default=0.1, help="Exclusion zone radius Z")
+    parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion zone radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion zone radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
     parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
-    parser.add_argument("--no_sweep", action="store_true", default=False,
+    parser.add_argument("--no_sweep", action="store_true", default=True,
                         help="Disable radius sweep, use standard single-excl mode")
-    parser.add_argument("--std_excl_min", type=float, default=0.01,
+    parser.add_argument("--std_excl_min", type=float, default=0.02,
                         help="Only exclude pixels with total_std > this value")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
