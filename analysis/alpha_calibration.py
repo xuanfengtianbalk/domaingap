@@ -289,9 +289,10 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     step = gr["bin_step"]
     trim_pct = gr.get("trim_pct", 0.1)
     if std_bins is None:
-        std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
-                    1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
-                    2.5,3.0,3.5,4.0,4.7,5.0]
+        # std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
+        #             1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
+        #             2.5,3.0,3.5,4.0,4.7,5.0]
+        std_bins=np.linspace(0.01, 10, 100).tolist()
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -549,6 +550,96 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             w.writeheader()
             w.writerows(csv_rows)
         print(f"  → {csv_path}")
+
+    # ── per-epsilon alpha tables ──
+    eps_str = ",".join(str(e) for e in epsilons)
+    for eps in epsilons:
+        k = str(eps)
+        if not calib_preds[k][0]:
+            continue
+        # extract per-epsilon pixels
+        ep_mp, ep_mg, ep_mt = [], [], []
+        for ax in range(3):
+            arrs = calib_preds[k][ax]
+            if arrs:
+                ep_mp.append(np.concatenate([np.atleast_1d(x) for x in arrs]))
+                ep_mg.append(np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]]))
+                ep_mt.append(np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]]))
+            else:
+                ep_mp.append(np.array([]))
+                ep_mg.append(np.array([]))
+                ep_mt.append(np.array([]))
+
+        # apply exclusion if active
+        if excl_active:
+            for ax in range(3):
+                keep = np.abs(ep_mp[ax] - excl_centers[ax]) >= excl_radii[ax]
+                ep_mp[ax] = ep_mp[ax][keep]
+                ep_mg[ax] = ep_mg[ax][keep]
+                ep_mt[ax] = ep_mt[ax][keep]
+
+        if len(ep_mp[0]) < 10:
+            continue
+
+        # build alpha table
+        ep_table = {}
+        for ax_idx, key in enumerate(["x", "y", "z"]):
+            mp = ep_mp[ax_idx]; mg = ep_mg[ax_idx]; mt = ep_mt[ax_idx]
+            if len(mp) < 10:
+                ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
+                continue
+            valid = np.abs(mp) >= 1e-3
+            if valid.sum() < 10:
+                ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
+                continue
+            pv, gv, tv = mp[valid], mg[valid], mt[valid]
+            alpha_v = (gv - pv) / (pv * tv + 1e-12)
+
+            gr_ax = gr[key]
+            if excl_active:
+                p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], 10)
+            else:
+                inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+                p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+
+            grid = []
+            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+                m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
+                for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                    m_p = (pv >= plo) & (pv < phi)
+                    m = m_t & m_p
+                    if m.sum() < 5:
+                        continue
+                    a = alpha_v[m]
+                    if m.sum() >= 10:
+                        lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                        a_ma = a[(a >= lo_a) & (a <= hi_a)]
+                    else:
+                        a_ma = a
+                    grid.append({
+                        "total_std_bin": i, "total_std_lo": float(tlo), "total_std_hi": float(thi),
+                        "pred_bin": j, "pred_lo": float(plo), "pred_hi": float(phi),
+                        "n": int(m.sum()),
+                        "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
+                        "mean_GT": float(gv[m].mean()),
+                        "mean_pred": float(pv[m].mean()),
+                        "mean_total_std": float(tv[m].mean()),
+                        "axis": key,
+                    })
+            ep_table[key] = {"grid": grid, "total_std_edges": [float(e) for e in ts_edges],
+                             "pred_edges": [float(e) for e in p_edges]}
+
+        # write CSV
+        ep_rows = []
+        for key in ["x", "y", "z"]:
+            ep_rows.extend(ep_table[key]["grid"])
+        if ep_rows:
+            ep_csv = os.path.join(out_dir, f"alpha_cali{excl_suffix}_eps_{k}.csv")
+            with open(ep_csv, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=ep_rows[0].keys())
+                w.writeheader()
+                w.writerows(ep_rows)
+            print(f"  → {ep_csv} ({len(ep_rows)} cells)")
 
     # calibration curve
     curve_path = os.path.join(out_dir, "calibration_curve.png")
