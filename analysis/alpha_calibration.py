@@ -220,7 +220,9 @@ def _plot_calibration_curve(calibration: dict, save_path: str):
 # ── main calibration ─────────────────────────────────────────────────────────
 
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
-              max_samples: int = 1000, std_bins: list = None, device: str = "cuda:0"):
+              max_samples: int = 1000, std_bins: list = None, device: str = "cuda:0",
+              excl_cx: float = None, excl_cy: float = None, excl_cz: float = None,
+              excl_rx: float = None, excl_ry: float = None, excl_rz: float = None):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -328,6 +330,36 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     n_alpha = sum(len(x) for x in merged_p[0])
     print(f"\nProcessed {n_images} images, merged alpha pixels: {n_alpha} per axis")
+
+    # --- per-axis center exclusion filter ---
+    excl_active = all(x is not None for x in [excl_cx, excl_cy, excl_cz, excl_rx, excl_ry, excl_rz])
+    excl_centers = [excl_cx, excl_cy, excl_cz]
+    excl_radii  = [excl_rx, excl_ry, excl_rz]
+    excl_suffix = ""
+    if excl_active:
+        excl_suffix = f"_excl_cx{excl_cx}_cy{excl_cy}_cz{excl_cz}_rx{excl_rx}_ry{excl_ry}_rz{excl_rz}"
+        # flatten first, then filter
+        mp_flat = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
+        mg_flat = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
+        mt_flat = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
+        
+        # per-axis keep for alpha table
+        for ax in range(3):
+            keep_ax = np.abs(mp_flat[ax] - excl_centers[ax]) >= excl_radii[ax]
+            merged_p[ax] = [mp_flat[ax][keep_ax]]
+            merged_g[ax] = [mg_flat[ax][keep_ax]]
+            merged_t[ax] = [mt_flat[ax][keep_ax]]
+        n_kept = len(merged_p[0][0])
+        print(f"  exclusion filter: {n_kept} pixels/axis remain ({(1-n_kept/n_alpha)*100:.1f}% excluded)")
+
+        # shared mask for supplementary analyses (pixel only if ALL axes survive)
+        shared_keep = np.ones(len(mp_flat[0]), dtype=bool)
+        for ax in range(3):
+            shared_keep &= np.abs(mp_flat[ax] - excl_centers[ax]) >= excl_radii[ax]
+        analysis_p_ax = [mp_flat[ax][shared_keep] for ax in range(3)]
+        analysis_g_ax = [mg_flat[ax][shared_keep] for ax in range(3)]
+        analysis_t_ax = [mt_flat[ax][shared_keep] for ax in range(3)]
+        print(f"  shared mask for analyses: {shared_keep.sum()} pixels remain")
 
     # --- robustness stats ---
     robustness = {}
@@ -441,7 +473,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         "calibration": calibration,
     }
 
-    json_path = os.path.join(out_dir, "alpha_cali.json")
+    json_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}.json")
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"  → {json_path}")
@@ -452,7 +484,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         for cell in alpha_table[key]["grid"]:
             csv_rows.append(cell)
     if csv_rows:
-        csv_path = os.path.join(out_dir, "alpha_cali.csv")
+        csv_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}.csv")
         with open(csv_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
             w.writeheader()
@@ -464,10 +496,15 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     _plot_calibration_curve(calibration, curve_path)
     print(f"  → {curve_path}")
 
-    # ── supplementary analyses (use merged attacked data) ──
-    c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
-    c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
-    c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
+    # ── supplementary analyses ──
+    if excl_active:
+        c_pred_ax = analysis_p_ax
+        c_gt_ax   = analysis_g_ax
+        c_ts_ax   = analysis_t_ax
+    else:
+        c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
+        c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
+        c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
 
     # clean
     tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct)
@@ -662,11 +699,18 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=100,
+    parser.add_argument("--max_samples", type=int, default=10000,
                         help="Max validation images")
+    parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
+    parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
+    parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion center Z")
+    parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion radius X")
+    parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion radius Y")
+    parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion radius Z")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    epsilons = args.epsilons if args.epsilons else sample_epsilon([2,2.5,3])
+    epsilons = args.epsilons if args.epsilons else sample_epsilon(None)
     print(f"Epsilons: {epsilons}")
-    calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device)
+    calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device,
+              args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz)

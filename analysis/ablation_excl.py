@@ -68,7 +68,7 @@ def main():
     parser = argparse.ArgumentParser(description="Ablation study on exclusion parameters")
     parser.add_argument("--uuid", default=None, help="Model UUID")
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=500)
+    parser.add_argument("--max_samples", type=int, default=10000)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -90,7 +90,7 @@ def main():
     }
     rxy_values = [0.025, 0.05, 0.1]
     rz_modes = ["uniform", "z_half"]
-    std_values = [0.025, 0.05, 0.1]
+    std_values = [0.0025, 0.005, 0.01]
     excl_modes = ["and", "or"]
 
     out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
