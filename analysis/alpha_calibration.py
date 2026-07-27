@@ -393,6 +393,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     excl_centers = [excl_cx, excl_cy, excl_cz]
     excl_radii  = [excl_rx, excl_ry, excl_rz]
     excl_suffix = ""
+    eps_name = "_".join(str(e) for e in epsilons)
     if excl_active:
         excl_suffix = f"_excl_cx{excl_cx}_cy{excl_cy}_cz{excl_cz}_rx{excl_rx}_ry{excl_ry}_rz{excl_rz}"
         # flatten first, then filter
@@ -481,6 +482,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                     "mean_pred": float(pv[m].mean()),
                     "mean_total_std": float(tv[m].mean()),
                     "axis": key,
+                    "eps": eps_name,
                 })
 
         alpha_table[key] = {
@@ -533,7 +535,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         "calibration": calibration,
     }
 
-    json_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}.json")
+    json_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}_merged_eps_{eps_name}.json")
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"  → {json_path}")
@@ -544,7 +546,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         for cell in alpha_table[key]["grid"]:
             csv_rows.append(cell)
     if csv_rows:
-        csv_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}.csv")
+        csv_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}_merged_eps_{eps_name}.csv")
         with open(csv_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
             w.writeheader()
@@ -552,7 +554,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         print(f"  → {csv_path}")
 
     # ── per-epsilon alpha tables ──
-    eps_str = ",".join(str(e) for e in epsilons)
     for eps in epsilons:
         k = str(eps)
         if not calib_preds[k][0]:
@@ -625,6 +626,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                         "mean_pred": float(pv[m].mean()),
                         "mean_total_std": float(tv[m].mean()),
                         "axis": key,
+                        "eps": k,
                     })
             ep_table[key] = {"grid": grid, "total_std_edges": [float(e) for e in ts_edges],
                              "pred_edges": [float(e) for e in p_edges]}
