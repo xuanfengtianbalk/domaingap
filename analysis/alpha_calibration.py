@@ -217,6 +217,62 @@ def _plot_calibration_curve(calibration: dict, save_path: str):
     plt.close()
 
 
+def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
+    """Build pred edges with exclusion zone removed, n_bins split across remaining ranges."""
+    full_lo, full_hi = gt_range[0], gt_range[1]
+    excl_lo, excl_hi = cx - rx, cx + rx
+
+    ranges = []
+    if excl_lo > full_lo:
+        ranges.append((full_lo, excl_lo))
+    if excl_hi < full_hi:
+        ranges.append((excl_hi, full_hi))
+
+    if not ranges:
+        return np.array([-np.inf, np.inf])
+
+    total_w = sum(hi - lo for lo, hi in ranges)
+    edges = [-np.inf]
+    remaining = n_bins
+    for i, (lo, hi) in enumerate(ranges):
+        if i == len(ranges) - 1:
+            n = remaining
+        else:
+            n = max(1, int(round((hi - lo) / total_w * n_bins)))
+            remaining -= n
+        seg_edges = np.linspace(lo, hi, n + 1)
+        edges.extend(seg_edges.tolist())
+    edges.append(np.inf)
+    return np.array(edges)
+    """Reliability diagram: alpha vs coverage, one curve per epsilon."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    eps_keys = sorted(calibration.keys(), key=float)
+    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(eps_keys)))
+    for ki, eps_k in enumerate(eps_keys):
+        c = calibration[eps_k]
+        if c.get("n_pixels", 0) == 0:
+            continue
+        alphas = np.array(c["alphas"])
+        coverages = np.array(c["coverages"])
+        ci_lo = np.array(c["ci_lower"])
+        ci_hi = np.array(c["ci_upper"])
+        errs = c["errors"]
+        label = f"ε={eps_k} (MAE={errs['MAE']:.3f})"
+        ax.fill_between(alphas, ci_lo, ci_hi, color=colors[ki], alpha=0.08)
+        ax.plot(alphas, coverages, "o-", color=colors[ki], markersize=4, linewidth=1.2, label=label)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.3, label="perfect")
+    ax.set_xlabel("Confidence level (alpha)")
+    ax.set_ylabel("Actual coverage")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.2)
+    ax.set_title("Reliability Calibration Curve (per FGSM epsilon)")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
 # ── main calibration ─────────────────────────────────────────────────────────
 
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
@@ -395,8 +451,11 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         alpha_v = (gv - pv) / (pv * tv + 1e-12)
 
         gr_ax = gr[key]
-        inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
-        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+        if excl_active:
+            p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], 10)
+        else:
+            inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+            p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         grid = []
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
@@ -507,7 +566,11 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
 
     # clean
-    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct)
+    # pred edges from main alpha table (used also for mini tables)
+    pred_edge_map = {k: alpha_table[k]["pred_edges"] for k in ["x", "y", "z"]}
+
+    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct,
+                                         pred_edges_dict=pred_edge_map)
     _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins_eff,
                                    os.path.join(out_dir, "alpha_correct_vs_unc.png"))
     _plot_ct_vs_uncertainty_for(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins,
@@ -523,7 +586,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         e_pred_ax = [np.concatenate([np.atleast_1d(x) for x in calib_preds[k][ax]]) for ax in range(3)]
         e_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]])   for ax in range(3)]
         e_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]])    for ax in range(3)]
-        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, std_bins, trim_pct)
+        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, std_bins, trim_pct,
+                                         pred_edges_dict=pred_edge_map)
         tag = f"eps_{k}"
         _plot_alpha_correct_vs_unc_for(e_pred_ax, e_gt_ax, e_ts_ax, tbl_e, n_ts_bins,
                                        os.path.join(out_dir, f"alpha_correct_vs_unc_{tag}.png"))
@@ -535,7 +599,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
 # ── supplementary analyses (shared across clean + per-ε) ─────────────────────
 
-def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, trim_pct):
+def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, trim_pct, pred_edges_dict=None):
     """Build per-axis alpha table from (pred, gt, ts) arrays. Returns {ax: lookup_dict}."""
     ts_edges = np.array([0.0] + list(std_bins) + [np.inf])
     alpha_tbl = {}
@@ -549,9 +613,12 @@ def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, 
             continue
         pv, gv, tv = p[valid], g[valid], t[valid]
         alpha_v = (gv - pv) / (pv * tv + 1e-12)
-        gr_ax = gr[key]
-        inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
-        p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+        if pred_edges_dict and key in pred_edges_dict:
+            p_edges = pred_edges_dict[key]
+        else:
+            gr_ax = gr[key]
+            inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+            p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         grid = {}
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
