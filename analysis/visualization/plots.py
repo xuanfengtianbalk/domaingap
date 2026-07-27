@@ -267,7 +267,7 @@ def plot_fusion_summary(stats: StatsAccumulator, split: str, out_dir: str | None
         alpha_v = (gv - cv) / (cv * tv + 1e-12)
         ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
         p_min, p_max = cv.min(), cv.max()
-        p_edges = np.arange(p_min, p_max + 0.025, 0.05)
+        p_edges = np.linspace(p_min, p_max, n_pred_bins + 1)
         p_edges = np.unique(np.round(p_edges, 8))
         for tlo, thi in zip(ts_edges[:-1], ts_edges[1:]):
             m_t = (tv >= tlo) & (tv < thi)
@@ -500,6 +500,7 @@ def plot_ct_vs_uncertainty(stats: StatsAccumulator, split: str, out_dir: str | N
         cfg = yaml.safe_load(f)
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
+    n_pred_bins = gr.get("n_pred_bins", 15)
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0))

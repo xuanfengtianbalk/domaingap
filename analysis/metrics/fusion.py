@@ -9,7 +9,7 @@ import numpy as np
 from metrics.accumulator import StatsAccumulator
 
 
-def _alpha_joint_correct(coord_a, gt, total_std, gt_ranges, step) -> np.ndarray:
+def _alpha_joint_correct(coord_a, gt, total_std, gt_ranges, step, n_pred_bins=15) -> np.ndarray:
     """Per-axis correction using 2D alpha lookup table.
 
     alpha = (GT - pred) / (pred * total_std)   per (total_std_bin, pred_bin) cell.
@@ -32,7 +32,7 @@ def _alpha_joint_correct(coord_a, gt, total_std, gt_ranges, step) -> np.ndarray:
 
         ts_edges = np.percentile(tv, np.linspace(0, 100, 11))
         gr = gt_ranges[keys[axis_idx]]
-        inner = np.arange(gr[0], gr[1] + step * 0.5, step)
+        inner = np.linspace(gr[0], gr[1], n_pred_bins + 1)
         p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
@@ -163,6 +163,7 @@ def compute(stats: StatsAccumulator) -> dict:
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     trim_pct = gr.get("trim_pct", 0.1)
+    n_pred_bins = gr.get("n_pred_bins", 15)
 
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
         total_var = np.maximum(stats.epi_var_A.flatten() + stats.alea_var_A.flatten(), 0.0)
@@ -170,7 +171,7 @@ def compute(stats: StatsAccumulator) -> dict:
     else:
         total_std = np.sqrt(np.maximum(stats.epi_var_A.flatten(), 0.0))
 
-    ca_corr = _alpha_joint_correct(ca, gt, total_std, gr, step)
+    ca_corr = _alpha_joint_correct(ca, gt, total_std, gr, step, n_pred_bins)
     e_corr = np.linalg.norm(ca_corr - gt, axis=1)
     result["H_alpha_correct_mae"]  = float(e_corr.mean())
     result["H_alpha_correct_rmse"] = float(np.sqrt((e_corr ** 2).mean()))

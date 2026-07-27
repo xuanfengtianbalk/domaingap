@@ -52,6 +52,8 @@ gt_ranges:
   bin_step: 0.05
   n_total_std_bins: 10
   trim_pct: 0.1
+  n_pred_bins: 15
+  excl_n_pred_bins: 10
 
 view_3d:
   elev: 25

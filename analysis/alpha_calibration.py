@@ -31,7 +31,7 @@ from math_.q_ import quatProduct  # noqa: F401
 def sample_epsilon(eps):
     """Return default epsilon values for FGSM attack."""
     if eps is None:
-        return [2.0]
+        return [1.8, 2.0, 2.2]
     return eps
 
 
@@ -288,6 +288,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     gr = cfg["gt_ranges"]
     step = gr["bin_step"]
     trim_pct = gr.get("trim_pct", 0.1)
+    n_pred_bins = gr.get("n_pred_bins", 15)
+    excl_n_pred_bins = gr.get("excl_n_pred_bins", 10)
     if std_bins is None:
         # std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
         #             1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
@@ -454,9 +456,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
         gr_ax = gr[key]
         if excl_active:
-            p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], 10)
+            p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
         else:
-            inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+            inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
             p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         grid = []
@@ -598,9 +600,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
             gr_ax = gr[key]
             if excl_active:
-                p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], 10)
+                p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
             else:
-                inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+                inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
                 p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
             grid = []
@@ -710,7 +712,7 @@ def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, 
             p_edges = pred_edges_dict[key]
         else:
             gr_ax = gr[key]
-            inner = np.arange(gr_ax[0], gr_ax[1] + step * 0.5, step)
+            inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
             p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
         grid = {}

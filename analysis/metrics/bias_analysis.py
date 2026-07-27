@@ -161,7 +161,7 @@ def _axis_analysis(epi, total_std, diff_a, diff_b, coord_a, coord_b, gt, gt_rang
     }
 
 
-def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_idx: int, n_ts_bins: int = 10, trim_pct: float = 0.1) -> dict:
+def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_idx: int, n_ts_bins: int = 10, trim_pct: float = 0.1, n_pred_bins: int = 15) -> dict:
     """2D bin: total_std (rows, n_ts_bins bins) × pred (cols, config range + overflow edges)."""
     ca = coord_a[:, axis_idx]
     gt_axis = gt[:, axis_idx]
@@ -172,7 +172,7 @@ def _alpha_joint_profile(coord_a, coord_b, gt, total_std, gt_range, step, axis_i
     alpha_v = (gt_v - ca_v) / (ca_v * ts_v + 1e-12)
 
     ts_edges = np.percentile(ts_v, np.linspace(0, 100, n_ts_bins + 1))
-    inner = np.arange(gt_range[0], gt_range[1] + step * 0.5, step)
+    inner = np.linspace(gt_range[0], gt_range[1], n_pred_bins + 1)
     p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
     grid = []
@@ -216,6 +216,7 @@ def compute(stats: StatsAccumulator) -> dict:
     step = gr["bin_step"]
     n_ts_bins = gr.get("n_total_std_bins", 10)
     trim_pct = gr.get("trim_pct", 0.1)
+    n_pred_bins = gr.get("n_pred_bins", 15)
 
     epi = stats.epi_var_A.flatten()
     if stats.alea_var_A is not None and len(stats.alea_var_A) > 0:
@@ -234,9 +235,9 @@ def compute(stats: StatsAccumulator) -> dict:
         "y": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["y"], step, 1),
         "z": _axis_analysis(epi, total_std, da, db, ca, cb, gt, gr["z"], step, 2),
         "alpha_joint": {
-            "x": _alpha_joint_profile(ca, cb, gt, total_std, gr["x"], step, 0, n_ts_bins, trim_pct),
-            "y": _alpha_joint_profile(ca, cb, gt, total_std, gr["y"], step, 1, n_ts_bins, trim_pct),
-            "z": _alpha_joint_profile(ca, cb, gt, total_std, gr["z"], step, 2, n_ts_bins, trim_pct),
+            "x": _alpha_joint_profile(ca, cb, gt, total_std, gr["x"], step, 0, n_ts_bins, trim_pct, n_pred_bins),
+            "y": _alpha_joint_profile(ca, cb, gt, total_std, gr["y"], step, 1, n_ts_bins, trim_pct, n_pred_bins),
+            "z": _alpha_joint_profile(ca, cb, gt, total_std, gr["z"], step, 2, n_ts_bins, trim_pct, n_pred_bins),
         },
     }
 
