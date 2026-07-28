@@ -553,12 +553,12 @@ if __name__ == "__main__":
     parser.add_argument("--uuid", default=None,
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", \
-                        "alpha_cali_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05_merged_eps_1.8_2.0_2.2.csv"))
+                        "alpha_cali_augmix_augmix_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=1000)
-    parser.add_argument("--std_min", type=float, default=0.05,
+    parser.add_argument("--max_samples", type=int, default=10000)
+    parser.add_argument("--std_min", type=float, default=0.11,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
-    parser.add_argument("--std_max", type=float, default=1,
+    parser.add_argument("--std_max", type=float, default=2,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
     # parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
     # parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")

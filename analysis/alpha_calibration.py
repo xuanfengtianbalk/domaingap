@@ -292,10 +292,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     n_pred_bins = gr.get("n_pred_bins", 15)
     excl_n_pred_bins = gr.get("excl_n_pred_bins", 10)
     if std_bins is None:
-        # std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
-        #             1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
-        #             2.5,3.0,3.5,4.0,4.7,5.0]
-        std_bins=np.linspace(0.0, 1, 20).tolist()
+        std_bins = np.linspace(0.01, 2, 20).tolist()
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -918,7 +915,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=100,
+    parser.add_argument("--max_samples", type=int, default=1000,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
