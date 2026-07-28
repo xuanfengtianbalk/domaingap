@@ -552,12 +552,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Alpha-corrected PnP evaluation on sunlamp/lightbox")
     parser.add_argument("--uuid", default=None,
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
-    parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", "alpha_cali.csv"))
+    parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", \
+                        "alpha_cali_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05_merged_eps_1.8_2.0_2.2.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=10000)
-    parser.add_argument("--std_min", type=float, default=0.0,
+    parser.add_argument("--max_samples", type=int, default=1000)
+    parser.add_argument("--std_min", type=float, default=0.05,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
-    parser.add_argument("--std_max", type=float, default=10.0,
+    parser.add_argument("--std_max", type=float, default=1,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
     # parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
     # parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
@@ -568,7 +569,7 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion zone radius X")
     parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion zone radius Y")
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
-    parser.add_argument("--corr_excl", action="store_true", default=False,
+    parser.add_argument("--corr_excl", action="store_true", default=True,
                         help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
@@ -576,7 +577,7 @@ if __name__ == "__main__":
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
     parser.add_argument("--no_sweep", action="store_true", default=True,
                         help="Disable radius sweep, use standard single-excl mode")
-    parser.add_argument("--std_excl_min", type=float, default=0.02,
+    parser.add_argument("--std_excl_min", type=float, default=0.01,
                         help="Only exclude pixels with total_std > this value")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()

@@ -31,7 +31,7 @@ from math_.q_ import quatProduct  # noqa: F401
 def sample_epsilon(eps):
     """Return default epsilon values for FGSM attack."""
     if eps is None:
-        return [1.8, 2.0, 2.2]
+        return [1.8, 1.9, 2.0, 2.1, 2.2]
     return eps
 
 
@@ -278,7 +278,8 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               max_samples: int = 1000, std_bins: list = None, device: str = "cuda:0",
               excl_cx: float = None, excl_cy: float = None, excl_cz: float = None,
-              excl_rx: float = None, excl_ry: float = None, excl_rz: float = None):
+              excl_rx: float = None, excl_ry: float = None, excl_rz: float = None,
+              mode: str = "fgsm", aug_type: str = None):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -294,7 +295,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         # std_bins = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8, 0.9,1.0,\
         #             1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,\
         #             2.5,3.0,3.5,4.0,4.7,5.0]
-        std_bins=np.linspace(0.01, 10, 100).tolist()
+        std_bins=np.linspace(0.0, 1, 20).tolist()
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -306,6 +307,18 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     # Dataloader
     dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
+
+    # --- augmix transform (if mode == "augmix") ---
+    if mode == "augmix":
+        if aug_type is None:
+            train_cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "cfg.yaml")
+            with open(train_cfg_path) as f:
+                train_cfg = _yaml.safe_load(f)
+            aug_type = train_cfg.get("AUG_TYPE", "augmix")
+        from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
+        aug_transform = SpaceAugTransform(aug_type, styleaug_p=0.0)
+        epsilons = ["0"]
+        print(f"Mode: augmix, aug_type={aug_type}")
 
     # Accumulators
     angle_list = {str(e): [] for e in epsilons}
@@ -325,6 +338,43 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         mask_gt = targets["mask_gt"][0]                             # (H, W)
         coors_gt = targets["coors_gt"]                              # (1, 3, H, W)
         m_valid = (mask_gt > 0.5).numpy()
+
+        # --- attack loop ---
+        if mode == "augmix":
+            # Augmix: apply augmentation once, skip FGSM, no PnP
+            img_np = (image.cpu().squeeze(0).permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
+            aug_img_np = aug_transform(image=img_np)["image"]
+            aug_tensor = torch.from_numpy(aug_img_np.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
+            with torch.no_grad(), torch.amp.autocast("cuda"):
+                outputs_raw_adv = model(aug_tensor)
+            full_adv = _extract_from_raw(outputs_raw_adv, model_type)
+            total_std_adv = _total_std_from_full(full_adv)
+
+            if m_valid.sum() > 0 and total_std_adv is not None:
+                pred_adv = full_adv["coords"][0].numpy()
+                ts_arr_adv = total_std_adv.squeeze(0)
+                if ts_arr_adv.ndim == 3:
+                    ts_pix_adv = ts_arr_adv[:, m_valid]
+                else:
+                    ts_pix_adv = np.broadcast_to(ts_arr_adv[m_valid][np.newaxis, :], (3, m_valid.sum()))
+                n_pix = int(m_valid.sum())
+                k = "0"  # augmix has no epsilon
+                for ax in range(3):
+                    need = MAX_CALIB_PIX - calib_counts[k][ax]
+                    if need <= 0:
+                        continue
+                    take = min(n_pix, need)
+                    if take < n_pix:
+                        idx = np.random.choice(n_pix, take, replace=False)
+                    else:
+                        idx = slice(None)
+                    calib_preds[k][ax].append(pred_adv[ax, m_valid][idx])
+                    calib_gts[k][ax].append(coors_gt[0, ax, m_valid].numpy()[idx])
+                    calib_ts[k][ax].append(ts_pix_adv[ax][idx])
+                    calib_counts[k][ax] += take
+
+            n_images += 1
+            continue
 
         # --- FGSM loop ---
         for eps in epsilons:
@@ -537,7 +587,13 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         "calibration": calibration,
     }
 
-    json_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}_merged_eps_{eps_name}.json")
+    # merged base name
+    if mode == "augmix":
+        base_name = f"alpha_cali_augmix_{aug_type}{excl_suffix}"
+    else:
+        base_name = f"alpha_cali{excl_suffix}_merged_eps_{eps_name}"
+
+    json_path = os.path.join(out_dir, f"{base_name}.json")
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"  → {json_path}")
@@ -548,102 +604,103 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         for cell in alpha_table[key]["grid"]:
             csv_rows.append(cell)
     if csv_rows:
-        csv_path = os.path.join(out_dir, f"alpha_cali{excl_suffix}_merged_eps_{eps_name}.csv")
+        csv_path = os.path.join(out_dir, f"{base_name}.csv")
         with open(csv_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
             w.writeheader()
             w.writerows(csv_rows)
         print(f"  → {csv_path}")
 
-    # ── per-epsilon alpha tables ──
-    for eps in epsilons:
-        k = str(eps)
-        if not calib_preds[k][0]:
-            continue
-        # extract per-epsilon pixels
-        ep_mp, ep_mg, ep_mt = [], [], []
-        for ax in range(3):
-            arrs = calib_preds[k][ax]
-            if arrs:
-                ep_mp.append(np.concatenate([np.atleast_1d(x) for x in arrs]))
-                ep_mg.append(np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]]))
-                ep_mt.append(np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]]))
-            else:
-                ep_mp.append(np.array([]))
-                ep_mg.append(np.array([]))
-                ep_mt.append(np.array([]))
-
-        # apply exclusion if active
-        if excl_active:
+    # ── per-epsilon alpha tables (FGSM only) ──
+    if mode == "fgsm":
+        for eps in epsilons:
+            k = str(eps)
+            if not calib_preds[k][0]:
+                continue
+            # extract per-epsilon pixels
+            ep_mp, ep_mg, ep_mt = [], [], []
             for ax in range(3):
-                keep = np.abs(ep_mp[ax] - excl_centers[ax]) >= excl_radii[ax]
-                ep_mp[ax] = ep_mp[ax][keep]
-                ep_mg[ax] = ep_mg[ax][keep]
-                ep_mt[ax] = ep_mt[ax][keep]
+                arrs = calib_preds[k][ax]
+                if arrs:
+                    ep_mp.append(np.concatenate([np.atleast_1d(x) for x in arrs]))
+                    ep_mg.append(np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]]))
+                    ep_mt.append(np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]]))
+                else:
+                    ep_mp.append(np.array([]))
+                    ep_mg.append(np.array([]))
+                    ep_mt.append(np.array([]))
 
-        if len(ep_mp[0]) < 10:
-            continue
-
-        # build alpha table
-        ep_table = {}
-        for ax_idx, key in enumerate(["x", "y", "z"]):
-            mp = ep_mp[ax_idx]; mg = ep_mg[ax_idx]; mt = ep_mt[ax_idx]
-            if len(mp) < 10:
-                ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
-                continue
-            valid = np.abs(mp) >= 1e-3
-            if valid.sum() < 10:
-                ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
-                continue
-            pv, gv, tv = mp[valid], mg[valid], mt[valid]
-            alpha_v = (gv - pv) / (pv * tv + 1e-12)
-
-            gr_ax = gr[key]
+            # apply exclusion if active
             if excl_active:
-                p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
-            else:
-                inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
-                p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+                for ax in range(3):
+                    keep = np.abs(ep_mp[ax] - excl_centers[ax]) >= excl_radii[ax]
+                    ep_mp[ax] = ep_mp[ax][keep]
+                    ep_mg[ax] = ep_mg[ax][keep]
+                    ep_mt[ax] = ep_mt[ax][keep]
 
-            grid = []
-            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-                m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
-                for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
-                    m_p = (pv >= plo) & (pv < phi)
-                    m = m_t & m_p
-                    if m.sum() < 5:
-                        continue
-                    a = alpha_v[m]
-                    if m.sum() >= 10:
-                        lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
-                        a_ma = a[(a >= lo_a) & (a <= hi_a)]
-                    else:
-                        a_ma = a
-                    grid.append({
-                        "total_std_bin": i, "total_std_lo": float(tlo), "total_std_hi": float(thi),
-                        "pred_bin": j, "pred_lo": float(plo), "pred_hi": float(phi),
-                        "n": int(m.sum()),
-                        "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
-                        "mean_GT": float(gv[m].mean()),
-                        "mean_pred": float(pv[m].mean()),
-                        "mean_total_std": float(tv[m].mean()),
-                        "axis": key,
-                        "eps": k,
-                    })
-            ep_table[key] = {"grid": grid, "total_std_edges": [float(e) for e in ts_edges],
-                             "pred_edges": [float(e) for e in p_edges]}
+            if len(ep_mp[0]) < 10:
+                continue
 
-        # write CSV
-        ep_rows = []
-        for key in ["x", "y", "z"]:
-            ep_rows.extend(ep_table[key]["grid"])
-        if ep_rows:
-            ep_csv = os.path.join(out_dir, f"alpha_cali{excl_suffix}_eps_{k}.csv")
-            with open(ep_csv, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=ep_rows[0].keys())
-                w.writeheader()
-                w.writerows(ep_rows)
-            print(f"  → {ep_csv} ({len(ep_rows)} cells)")
+            # build alpha table
+            ep_table = {}
+            for ax_idx, key in enumerate(["x", "y", "z"]):
+                mp = ep_mp[ax_idx]; mg = ep_mg[ax_idx]; mt = ep_mt[ax_idx]
+                if len(mp) < 10:
+                    ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
+                    continue
+                valid = np.abs(mp) >= 1e-3
+                if valid.sum() < 10:
+                    ep_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
+                    continue
+                pv, gv, tv = mp[valid], mg[valid], mt[valid]
+                alpha_v = (gv - pv) / (pv * tv + 1e-12)
+
+                gr_ax = gr[key]
+                if excl_active:
+                    p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
+                else:
+                    inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
+                    p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+
+                grid = []
+                for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+                    m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
+                    for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                        m_p = (pv >= plo) & (pv < phi)
+                        m = m_t & m_p
+                        if m.sum() < 5:
+                            continue
+                        a = alpha_v[m]
+                        if m.sum() >= 10:
+                            lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                            a_ma = a[(a >= lo_a) & (a <= hi_a)]
+                        else:
+                            a_ma = a
+                        grid.append({
+                            "total_std_bin": i, "total_std_lo": float(tlo), "total_std_hi": float(thi),
+                            "pred_bin": j, "pred_lo": float(plo), "pred_hi": float(phi),
+                            "n": int(m.sum()),
+                            "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
+                            "mean_GT": float(gv[m].mean()),
+                            "mean_pred": float(pv[m].mean()),
+                            "mean_total_std": float(tv[m].mean()),
+                            "axis": key,
+                            "eps": k,
+                        })
+                ep_table[key] = {"grid": grid, "total_std_edges": [float(e) for e in ts_edges],
+                                 "pred_edges": [float(e) for e in p_edges]}
+
+            # write CSV
+            ep_rows = []
+            for key in ["x", "y", "z"]:
+                ep_rows.extend(ep_table[key]["grid"])
+            if ep_rows:
+                ep_csv = os.path.join(out_dir, f"alpha_cali{excl_suffix}_eps_{k}.csv")
+                with open(ep_csv, "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=ep_rows[0].keys())
+                    w.writeheader()
+                    w.writerows(ep_rows)
+                print(f"  → {ep_csv} ({len(ep_rows)} cells)")
 
     # calibration curve
     curve_path = os.path.join(out_dir, "calibration_curve.png")
@@ -861,7 +918,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=10000,
+    parser.add_argument("--max_samples", type=int, default=100,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
@@ -869,10 +926,13 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion radius X")
     parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion radius Y")
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion radius Z")
+    parser.add_argument("--mode", choices=["fgsm", "augmix"], default="fgsm")
+    parser.add_argument("--aug_type", default=None, help="SpaceAugTransform aug_type (default: from cfg.yaml)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
     epsilons = args.epsilons if args.epsilons else sample_epsilon(None)
     print(f"Epsilons: {epsilons}")
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device,
-              args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz)
+              args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
+              args.mode, args.aug_type)
