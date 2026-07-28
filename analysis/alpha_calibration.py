@@ -279,7 +279,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               max_samples: int = 1000, std_bins: list = None, device: str = "cuda:0",
               excl_cx: float = None, excl_cy: float = None, excl_cz: float = None,
               excl_rx: float = None, excl_ry: float = None, excl_rz: float = None,
-              mode: str = "fgsm", aug_type: str = None):
+              mode: str = "fgsm", aug_type: str = None,
+              train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -292,7 +293,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     n_pred_bins = gr.get("n_pred_bins", 15)
     excl_n_pred_bins = gr.get("excl_n_pred_bins", 10)
     if std_bins is None:
-        std_bins = np.linspace(0.01, 2, 20).tolist()
+        std_bins = np.linspace(0.01, 5, 20).tolist()
 
     # Load model
     from analysis_utils import get_model_type_from_traininfo
@@ -313,7 +314,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 train_cfg = _yaml.safe_load(f)
             aug_type = train_cfg.get("AUG_TYPE", "augmix")
         from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-        aug_transform = SpaceAugTransform(aug_type, styleaug_p=0.0)
+        aug_transform = SpaceAugTransform(aug_type, styleaug_p=0.5)
         epsilons = ["0"]
         print(f"Mode: augmix, aug_type={aug_type}")
 
@@ -468,6 +469,13 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         analysis_t_ax = [mt_flat[ax][shared_keep] for ax in range(3)]
         print(f"  shared mask for analyses: {shared_keep.sum()} pixels remain")
 
+    # --- train AlphaMLP (optional) ---
+    mlp_state = None
+    if train_mlp:
+        from alpha_mlp import train_alpha_mlp
+        mlp_state = train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
+                                     device=device, epochs=mlp_epochs, lr=mlp_lr)
+
     # --- robustness stats ---
     robustness = {}
     for eps in epsilons:
@@ -570,6 +578,14 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # --- write outputs ---
     out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
     os.makedirs(out_dir, exist_ok=True)
+
+    # save trained MLP if available
+    if train_mlp and mlp_state is not None:
+        import torch as _t
+        model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}" if mode == "augmix" else f"alpha_mlp_fgsm{excl_suffix}"
+        pt_path = os.path.join(out_dir, f"{model_name}.pt")
+        _t.save(mlp_state, pt_path)
+        print(f"  → {pt_path}")
 
     result = {
         "metadata": {
@@ -915,7 +931,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=1000,
+    parser.add_argument("--max_samples", type=int, default=10000,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
@@ -925,6 +941,9 @@ if __name__ == "__main__":
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion radius Z")
     parser.add_argument("--mode", choices=["fgsm", "augmix"], default="fgsm")
     parser.add_argument("--aug_type", default=None, help="SpaceAugTransform aug_type (default: from cfg.yaml)")
+    parser.add_argument("--train_mlp", action="store_true", help="Train AlphaMLP after calibration")
+    parser.add_argument("--mlp_epochs", type=int, default=100, help="MLP training epochs")
+    parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -932,4 +951,5 @@ if __name__ == "__main__":
     print(f"Epsilons: {epsilons}")
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device,
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
-              args.mode, args.aug_type)
+              args.mode, args.aug_type,
+              args.train_mlp, args.mlp_epochs, args.mlp_lr)

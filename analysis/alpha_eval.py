@@ -58,11 +58,11 @@ def load_alpha_table(csv_path: str) -> dict:
 # ── coordinate correction ────────────────────────────────────────────────────
 
 def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.Tensor,
-                   logb: torch.Tensor, alpha_table: dict, std_min: float, std_max: float) -> tuple:
+                   logb: torch.Tensor, alpha_table: dict, std_min: float, std_max: float,
+                   mlp_model=None) -> tuple:
     """Apply per-axis alpha correction. Returns (coords_corrected, nan_mask).
 
-    Pixels with any per-axis total_std outside [std_min, std_max] are set to NaN.
-    Returns the NaN mask so caller can apply to original coords for fair comparison.
+    If mlp_model is provided, uses MLP inference instead of CSV lookup table.
     """
     import numpy as np
 
@@ -94,15 +94,25 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
     coords_np[:, nan_mask] = float("nan")
 
     for ax_idx, key in enumerate(["x", "y", "z"]):
+        ts_ax = total_std[ax_idx]
+        pr_ax = coords_np[ax_idx]
+
+        if mlp_model is not None:
+            # MLP inference: per-pixel alpha prediction
+            ts_t = torch.tensor(ts_ax[mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            pr_t = torch.tensor(pr_ax[mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            with torch.no_grad():
+                alpha_t = mlp_model(key, ts_t, pr_t)
+            alpha_np = alpha_t.cpu().numpy()
+            coords_np[ax_idx, mid] = pr_ax[mid] + alpha_np * pr_ax[mid] * ts_ax[mid]
+            continue
+
         tbl = alpha_table[key]
         ts_edges = tbl["edges_ts"]
         p_edges  = tbl["edges_pred"]
         grid     = tbl["grid"]
         if len(ts_edges) == 0 or len(p_edges) == 0:
             continue
-
-        ts_ax = total_std[ax_idx]
-        pr_ax = coords_np[ax_idx]
 
         for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
             for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
@@ -149,7 +159,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              std_min: float, std_max: float, device: str = "cuda:0", uuid: str | None = None,
              excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
              excl_mode: str = "and",
-             excl_sweep_r: list = None, std_excl_min: float = 0.0):
+             excl_sweep_r: list = None, std_excl_min: float = 0.0,
+             alpha_mlp: str = None):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -167,6 +178,12 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
     alpha_table = load_alpha_table(alpha_csv)
     print(f"Loaded alpha table: {sum(len(t['grid']) for t in alpha_table.values())} cells")
+
+    mlp_model = None
+    if alpha_mlp:
+        from alpha_mlp import load_alpha_mlp
+        mlp_model = load_alpha_mlp(alpha_mlp, device)
+        print(f"Loaded MLP model from {alpha_mlp}")
 
     out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
     os.makedirs(out_dir, exist_ok=True)
@@ -189,7 +206,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
         if do_sweep:
             _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
-                       corr_excl, excl_sweep_r, std_excl_min, out_dir, split, device)
+                       corr_excl, excl_sweep_r, std_excl_min, out_dir, split, device, mlp_model)
             continue
 
         base_angles, base_dists = [], []
@@ -260,7 +277,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             coords_corr, _ = correct_coords(
                 raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
                 raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
-                alpha_table, std_min, std_max)
+                alpha_table, std_min, std_max, mlp_model)
 
             outputs_corr = dict(outputs_raw)
             outputs_corr["c"] = coords_corr
@@ -346,7 +363,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 # ── exclusion ratio sweep ─────────────────────────────────────────────────────
 
 def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
-               corr_excl, sweep_r, std_excl_min, out_dir, split, device):
+               corr_excl, sweep_r, std_excl_min, out_dir, split, device, mlp_model=None):
     """Sweep over exclusion radii + std threshold — PnP runs once per image, only ratio varies."""
     import matplotlib
     matplotlib.use("Agg")
@@ -402,7 +419,7 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radiu
         coords_corr, _ = correct_coords(
             raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
             raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
-            alpha_table, std_min, std_max)
+            alpha_table, std_min, std_max, mlp_model)
         outputs_corr_std = dict(outputs_raw)
         outputs_corr_std["c"] = coords_corr
         angle_corr, dist_corr, _ = run_pnp(outputs_corr_std, gtbbox, qgt, rgt)
@@ -555,10 +572,10 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", \
                         "alpha_cali_augmix_augmix_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=10000)
-    parser.add_argument("--std_min", type=float, default=0.11,
+    parser.add_argument("--max_samples", type=int, default=100)
+    parser.add_argument("--std_min", type=float, default=0.01,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
-    parser.add_argument("--std_max", type=float, default=2,
+    parser.add_argument("--std_max", type=float, default=5,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
     # parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
     # parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
@@ -575,10 +592,12 @@ if __name__ == "__main__":
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
-    parser.add_argument("--no_sweep", action="store_true", default=True,
+    parser.add_argument("--no_sweep", action="store_true", default=False,
                         help="Disable radius sweep, use standard single-excl mode")
     parser.add_argument("--std_excl_min", type=float, default=0.01,
                         help="Only exclude pixels with total_std > this value")
+    parser.add_argument("--alpha_mlp", type=str, default=None,
+                        help="Use trained MLP model instead of CSV lookup table")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -594,4 +613,5 @@ if __name__ == "__main__":
         sweep_r = DEFAULT_SWEEP
 
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
-             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min)
+             args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min,
+             args.alpha_mlp)
