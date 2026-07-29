@@ -93,36 +93,41 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
     nan_mask = ~(low | mid)
     coords_np[:, nan_mask] = float("nan")
 
-    for ax_idx, key in enumerate(["x", "y", "z"]):
-        ts_ax = total_std[ax_idx]
-        pr_ax = coords_np[ax_idx]
+    if mlp_model is not None:
+        # Unified 3-axis MLP: one forward pass for all axes
+        tx_t = torch.tensor(total_std[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        px_t = torch.tensor(coords_np[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        ty_t = torch.tensor(total_std[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        py_t = torch.tensor(coords_np[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        tz_t = torch.tensor(total_std[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        pz_t = torch.tensor(coords_np[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+        with torch.no_grad():
+            corrected_3d = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)  # (N, 3)
+        corr_np = corrected_3d.cpu().numpy()
+        coords_np[0, mid] = corr_np[:, 0]
+        coords_np[1, mid] = corr_np[:, 1]
+        coords_np[2, mid] = corr_np[:, 2]
+    else:
+        for ax_idx, key in enumerate(["x", "y", "z"]):
+            ts_ax = total_std[ax_idx]
+            pr_ax = coords_np[ax_idx]
 
-        if mlp_model is not None:
-            # MLP inference: per-pixel alpha prediction
-            ts_t = torch.tensor(ts_ax[mid], dtype=torch.float32, device=device).reshape(-1, 1)
-            pr_t = torch.tensor(pr_ax[mid], dtype=torch.float32, device=device).reshape(-1, 1)
-            with torch.no_grad():
-                alpha_t = mlp_model(key, ts_t, pr_t)
-            alpha_np = alpha_t.cpu().numpy()
-            coords_np[ax_idx, mid] = pr_ax[mid] + alpha_np * pr_ax[mid] * ts_ax[mid]
-            continue
+            tbl = alpha_table[key]
+            ts_edges = tbl["edges_ts"]
+            p_edges  = tbl["edges_pred"]
+            grid     = tbl["grid"]
+            if len(ts_edges) == 0 or len(p_edges) == 0:
+                continue
 
-        tbl = alpha_table[key]
-        ts_edges = tbl["edges_ts"]
-        p_edges  = tbl["edges_pred"]
-        grid     = tbl["grid"]
-        if len(ts_edges) == 0 or len(p_edges) == 0:
-            continue
-
-        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
-                ma = grid.get((i, j))
-                if ma is None:
-                    continue
-                mask = (ts_ax >= tlo) & (ts_ax < thi) & (pr_ax >= plo) & (pr_ax < phi) & mid
-                if mask.sum() == 0:
-                    continue
-                coords_np[ax_idx, mask] = pr_ax[mask] + ma * pr_ax[mask] * ts_ax[mask]
+            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+                for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                    ma = grid.get((i, j))
+                    if ma is None:
+                        continue
+                    mask = (ts_ax >= tlo) & (ts_ax < thi) & (pr_ax >= plo) & (pr_ax < phi) & mid
+                    if mask.sum() == 0:
+                        continue
+                    coords_np[ax_idx, mask] = pr_ax[mask] + ma * pr_ax[mask] * ts_ax[mask]
 
     result = torch.from_numpy(coords_np).unsqueeze(0).to(device).to(coords.dtype)
     return result, nan_mask
@@ -176,13 +181,14 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
     with open(cfg_path) as f:
         cfg = _yaml.safe_load(f)
 
-    alpha_table = load_alpha_table(alpha_csv)
-    print(f"Loaded alpha table: {sum(len(t['grid']) for t in alpha_table.values())} cells")
+    alpha_table = load_alpha_table(alpha_csv) if not alpha_mlp else None
+    if alpha_table:
+        print(f"Loaded alpha table: {sum(len(t['grid']) for t in alpha_table.values())} cells")
 
     mlp_model = None
     if alpha_mlp:
-        from alpha_mlp import load_alpha_mlp
-        mlp_model = load_alpha_mlp(alpha_mlp, device)
+        from alpha_mlp import load_correction_mlp
+        mlp_model = load_correction_mlp(alpha_mlp, device)
         print(f"Loaded MLP model from {alpha_mlp}")
 
     out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
@@ -592,7 +598,7 @@ if __name__ == "__main__":
                         help="Exclusion mode: all axes (and) or any axis (or)")
     parser.add_argument("--excl_sweep_r", nargs="*", type=float, default=None,
                         help="Exclusion radius sweep (enables ratio vs error analysis)")
-    parser.add_argument("--no_sweep", action="store_true", default=False,
+    parser.add_argument("--no_sweep", action="store_true", default=True,
                         help="Disable radius sweep, use standard single-excl mode")
     parser.add_argument("--std_excl_min", type=float, default=0.01,
                         help="Only exclude pixels with total_std > this value")

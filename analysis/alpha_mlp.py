@@ -1,184 +1,157 @@
-"""alpha_mlp.py — Learned Alpha Prediction Network (FreqEnc + MLP).
+"""alpha_mlp.py — Unified 3-axis coordinate correction model.
 
-Three independent MLPs (x/y/z), each maps (total_std, pred) → alpha.
-Replaces CSV lookup table with continuous differentiable function.
+Input:  (ts_x, pred_x, ts_y, pred_y, ts_z, pred_z) × 6 FreqEnc(10) → 120D
+MLP:    120 → 256 → 128 → 64 → 3
+Output: (corrected_x, corrected_y, corrected_z)
+
+Directly predicts corrected 3D coordinates from uncertainty + raw prediction.
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
-import math, os
+import math
 
 
 class FreqEmbed(nn.Module):
-    """Positional encoding: (B,1) → (B, 2*freqs) using sin/cos."""
+    """Positional encoding: (B,1) → (B, 2*freqs)."""
     def __init__(self, freqs=10):
         super().__init__()
         self.freqs = freqs
 
     def forward(self, x):
-        # x: (B, 1)
         out = []
         for i in range(self.freqs):
             f = 2.0 ** i
             out.append(torch.sin(f * math.pi * x))
             out.append(torch.cos(f * math.pi * x))
-        return torch.cat(out, dim=-1)  # (B, 2*freqs)
+        return torch.cat(out, dim=-1)
 
 
-class AlphaMLPSingle(nn.Module):
-    """MLP for one axis: 40 → 128 → 64 → 32 → 1."""
+class UnifiedCorrectionMLP(nn.Module):
+    """6-freq features → 120D → 256 → 128 → 64 → 3 (corrected xyz)."""
+
     def __init__(self):
         super().__init__()
         self.embed = FreqEmbed(10)
         self.mlp = nn.Sequential(
-            nn.Linear(40, 128), nn.ReLU(),
-            nn.Linear(128, 64),  nn.ReLU(),
-            nn.Linear(64, 32),   nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(120, 256),
+            nn.Linear(256, 128),
+            nn.Linear(128, 64),
+            nn.Linear(64, 3),
         )
 
-    def forward(self, ts, pred):
-        # ts, pred: (B,) or (B,1)
-        if ts.dim() == 1:
-            ts = ts.unsqueeze(-1)
-        if pred.dim() == 1:
-            pred = pred.unsqueeze(-1)
-        x_ts   = self.embed(ts)      # (B, 20)
-        x_pred = self.embed(pred)    # (B, 20)
-        x = torch.cat([x_ts, x_pred], dim=-1)  # (B, 40)
-        return self.mlp(x).squeeze(-1)  # (B,)
+    def forward(self, tx, px, ty, py, tz, pz):
+        # each: (B, 1)
+        feat = torch.cat([
+            self.embed(tx), self.embed(px),
+            self.embed(ty), self.embed(py),
+            self.embed(tz), self.embed(pz),
+        ], dim=-1)  # (B, 120)
+        return self.mlp(feat)
 
 
-class AlphaMLP3D(nn.Module):
-    """Three independent single-axis MLPs."""
-    def __init__(self):
-        super().__init__()
-        self.x = AlphaMLPSingle()
-        self.y = AlphaMLPSingle()
-        self.z = AlphaMLPSingle()
+def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
+                         device="cuda:0", batch_size=16, epochs=100, lr=1e-3):
+    """Train unified 3-axis correction model.
 
-    def forward(self, axis, ts, pred):
-        if axis == 0 or axis == "x":
-            return self.x(ts, pred)
-        elif axis == 1 or axis == "y":
-            return self.y(ts, pred)
-        else:
-            return self.z(ts, pred)
+    Loss = MSE(predicted_corrected_3d, GT_3d) on pixels where all 3 axes
+    have |pred_ax| >= 1e-3.
 
-
-def train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
-                    device="cuda:0", batch_size=16, epochs=100, lr=1e-3):
-    """Train 3 independent MLPs on per-epsilon raw pixel data.
-
-    Args:
-        calib_preds: {eps: [ax0_list, ax1_list, ax2_list]} — per-image arrays
-        calib_gts:   same structure
-        calib_ts:    same structure
-        epsilons:    list of epsilon keys
-        device:      torch device
-        batch_size:  number of images per batch
-        epochs:      training epochs
-        lr:          learning rate
-
-    Returns:
-        dict of {axis: AlphaMLPSingle} state_dicts
+    Returns state_dict of the trained model.
     """
     eps = 1e-3
-    models = {"x": AlphaMLPSingle().to(device),
-              "y": AlphaMLPSingle().to(device),
-              "z": AlphaMLPSingle().to(device)}
+    model = UnifiedCorrectionMLP().to(device)
 
-    # build per-axis per-image arrays
-    eps = 1e-3
-    models = {"x": AlphaMLPSingle().to(device),
-              "y": AlphaMLPSingle().to(device),
-              "z": AlphaMLPSingle().to(device)}
-
-    # build image-indexed data per axis
-    axis_images = {"x": [], "y": [], "z": []}
-    for k in epsilons:
-        k = str(k)
+    # build aligned per-image arrays across axes
+    aligned_imgs = []
+    for k in [str(e) for e in epsilons]:
         n_imgs = len(calib_preds[k][0])
         for i in range(n_imgs):
-            for ax_idx, ax_name in enumerate(["x", "y", "z"]):
-                p = np.atleast_1d(calib_preds[k][ax_idx][i]).ravel()
-                g = np.atleast_1d(calib_gts[k][ax_idx][i]).ravel()
-                t = np.atleast_1d(calib_ts[k][ax_idx][i]).ravel()
-                valid = np.abs(p) >= eps
-                if valid.sum() > 0:
-                    axis_images[ax_name].append((p[valid], g[valid], t[valid]))
+            px = np.atleast_1d(calib_preds[k][0][i]).ravel()
+            py = np.atleast_1d(calib_preds[k][1][i]).ravel()
+            pz = np.atleast_1d(calib_preds[k][2][i]).ravel()
+            gx = np.atleast_1d(calib_gts[k][0][i]).ravel()
+            gy = np.atleast_1d(calib_gts[k][1][i]).ravel()
+            gz = np.atleast_1d(calib_gts[k][2][i]).ravel()
+            tx = np.atleast_1d(calib_ts[k][0][i]).ravel()
+            ty = np.atleast_1d(calib_ts[k][1][i]).ravel()
+            tz = np.atleast_1d(calib_ts[k][2][i]).ravel()
 
-    n_imgs_x = len(axis_images["x"])
-    print(f"  MLP training: {n_imgs_x} images/axis, {epochs} epochs, lr={lr}, batch={batch_size} images")
+            valid = (np.abs(px) >= eps) & (np.abs(py) >= eps) & (np.abs(pz) >= eps)
+            if valid.sum() > 0:
+                aligned_imgs.append({
+                    "tx": tx[valid], "px": px[valid],
+                    "ty": ty[valid], "py": py[valid],
+                    "tz": tz[valid], "pz": pz[valid],
+                    "gx": gx[valid], "gy": gy[valid], "gz": gz[valid],
+                })
 
-    for ax_name, model in models.items():
-        imgs = axis_images[ax_name]
-        n_imgs = len(imgs)
-        n_train = int(0.8 * n_imgs)
-        n_val = n_imgs - n_train
+    n_imgs = len(aligned_imgs)
+    n_train = int(0.8 * n_imgs)
+    print(f"  MLP training: {n_imgs} images, {epochs} epochs, lr={lr}, batch={batch_size}")
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    # val set
+    val_ts = {k: torch.cat([torch.tensor(aligned_imgs[i][k], dtype=torch.float32)
+                            for i in range(n_train, n_imgs)]).reshape(-1, 1).to(device)
+              for k in ["tx", "px", "ty", "py", "tz", "pz"]}
+    val_gt = torch.stack([
+        torch.cat([torch.tensor(aligned_imgs[i]["gx"], dtype=torch.float32) for i in range(n_train, n_imgs)]),
+        torch.cat([torch.tensor(aligned_imgs[i]["gy"], dtype=torch.float32) for i in range(n_train, n_imgs)]),
+        torch.cat([torch.tensor(aligned_imgs[i]["gz"], dtype=torch.float32) for i in range(n_train, n_imgs)]),
+    ], dim=-1).to(device)
 
-        # prepare val set (all val images at once)
-        val_pred = torch.cat([torch.tensor(imgs[i][0], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
-        val_gt   = torch.cat([torch.tensor(imgs[i][1], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
-        val_ts   = torch.cat([torch.tensor(imgs[i][2], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
-        alpha_val = (val_gt - val_pred) / (val_pred * val_ts + 1e-12)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    best_val = float("inf")
 
-        best_loss = float("inf")
-        for epoch in range(epochs):
-            model.train()
-            perm = torch.randperm(n_train)
-            total_loss = 0.0
-            n_batches = 0
+    for epoch in range(epochs):
+        model.train()
+        perm = torch.randperm(n_train)
+        total_loss, n_batches = 0.0, 0
 
-            for start in range(0, n_train, batch_size):
-                end = min(start + batch_size, n_train)
-                idx = perm[start:end].tolist()
+        for start in range(0, n_train, batch_size):
+            end = min(start + batch_size, n_train)
+            idx = perm[start:end].tolist()
 
-                # concat selected images
-                pred_b = torch.cat([torch.tensor(imgs[i][0], dtype=torch.float32) for i in idx]).to(device)
-                gt_b   = torch.cat([torch.tensor(imgs[i][1], dtype=torch.float32) for i in idx]).to(device)
-                ts_b   = torch.cat([torch.tensor(imgs[i][2], dtype=torch.float32) for i in idx]).to(device)
-                alpha_b = (gt_b - pred_b) / (pred_b * ts_b + 1e-12)
+            ts = {k: torch.cat([torch.tensor(aligned_imgs[i][k], dtype=torch.float32)
+                                for i in idx]).reshape(-1, 1).to(device)
+                  for k in ["tx", "px", "ty", "py", "tz", "pz"]}
+            gt_b = torch.stack([
+                torch.cat([torch.tensor(aligned_imgs[i]["gx"], dtype=torch.float32) for i in idx]),
+                torch.cat([torch.tensor(aligned_imgs[i]["gy"], dtype=torch.float32) for i in idx]),
+                torch.cat([torch.tensor(aligned_imgs[i]["gz"], dtype=torch.float32) for i in idx]),
+            ], dim=-1).to(device)
 
-                pred_out = model(ts_b, pred_b)
-                loss = nn.functional.mse_loss(pred_out, alpha_b)
+            pred = model(ts["tx"], ts["px"], ts["ty"], ts["py"], ts["tz"], ts["pz"])
+            loss = nn.functional.mse_loss(pred, gt_b)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-                n_batches += 1
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
 
-            scheduler.step()
+        scheduler.step()
 
-            model.eval()
-            with torch.no_grad():
-                val_out = model(val_ts, val_pred)
-                val_loss = nn.functional.mse_loss(val_out, alpha_val).item()
+        model.eval()
+        with torch.no_grad():
+            val_pred = model(val_ts["tx"], val_ts["px"], val_ts["ty"], val_ts["py"], val_ts["tz"], val_ts["pz"])
+            val_loss = nn.functional.mse_loss(val_pred, val_gt).item()
 
-            if epoch % 20 == 0 or epoch == epochs - 1:
-                print(f"    {ax_name} epoch {epoch:3d}: train_loss={total_loss/n_batches:.4f} val_loss={val_loss:.4f}")
-            if val_loss < best_loss:
-                best_loss = val_loss
+        if epoch % 20 == 0 or epoch == epochs - 1:
+            print(f"    epoch {epoch:3d}: train={total_loss/n_batches:.4f} val={val_loss:.4f}")
+        if val_loss < best_val:
+            best_val = val_loss
 
-        print(f"    {ax_name}: best val_loss={best_loss:.4f}")
-
-    return {"x": models["x"].state_dict(),
-            "y": models["y"].state_dict(),
-            "z": models["z"].state_dict()}
+    print(f"    best val_loss={best_val:.4f}")
+    return model.state_dict()
 
 
-def load_alpha_mlp(pt_path: str, device: str = "cuda:0"):
-    """Load trained MLP model for inference."""
-    model3d = AlphaMLP3D()
+def load_correction_mlp(pt_path: str, device: str = "cuda:0"):
+    model = UnifiedCorrectionMLP()
     state = torch.load(pt_path, map_location=device, weights_only=True)
-    model3d.x.load_state_dict(state["x"])
-    model3d.y.load_state_dict(state["y"])
-    model3d.z.load_state_dict(state["z"])
-    model3d.to(device)
-    model3d.eval()
-    return model3d
+    model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+    return model

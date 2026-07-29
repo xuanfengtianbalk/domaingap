@@ -324,8 +324,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     dist_list  = {str(e): [] for e in epsilons}
     ts_adv_list   = {str(e): [] for e in epsilons}
 
-    # Per-epsilon calibration accumulators (sampled, max ~200k/axis/epsilon)
-    MAX_CALIB_PIX = 200_000
+    # Per-epsilon calibration accumulators (sampled)
+    max_calib_pix = 5_000_000 if train_mlp else 200_000
     calib_preds = {str(e): [[], [], []] for e in epsilons}   # {eps: [ax0_list, ax1_list, ax2_list]}
     calib_gts   = {str(e): [[], [], []] for e in epsilons}
     calib_ts    = {str(e): [[], [], []] for e in epsilons}
@@ -359,7 +359,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 n_pix = int(m_valid.sum())
                 k = "0"  # augmix has no epsilon
                 for ax in range(3):
-                    need = MAX_CALIB_PIX - calib_counts[k][ax]
+                    need = max_calib_pix - calib_counts[k][ax]
                     if need <= 0:
                         continue
                     take = min(n_pix, need)
@@ -394,7 +394,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 n_pix = int(m_valid.sum())
                 k = str(eps)
                 for ax in range(3):
-                    need = MAX_CALIB_PIX - calib_counts[k][ax]
+                    need = max_calib_pix - calib_counts[k][ax]
                     if need <= 0:
                         continue
                     take = min(n_pix, need)
@@ -473,9 +473,9 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # --- train AlphaMLP (optional) ---
     mlp_state = None
     if train_mlp:
-        from alpha_mlp import train_alpha_mlp
-        mlp_state = train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
-                                     device=device, epochs=mlp_epochs, lr=mlp_lr, batch_size=mlp_batch)
+        from alpha_mlp import train_correction_mlp
+        mlp_state = train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
+                                          device=device, epochs=mlp_epochs, lr=mlp_lr, batch_size=mlp_batch)
 
     # --- robustness stats ---
     robustness = {}
