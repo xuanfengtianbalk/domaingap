@@ -1108,8 +1108,8 @@ if __name__ == "__main__":
     parser.add_argument("--mlp_epochs", type=int, default=100, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
-    parser.add_argument("--mlp_no_freq_enc", action="store_true", default=False, help="Disable freq encoding in MLP")
-    parser.add_argument("--mlp_no_excl", action="store_true", default=False, help="Disable exclusion filter for MLP")
+    parser.add_argument("--mlp_raw", action="store_true", default=False, help="Use raw features (no freq encoding) in MLP")
+    parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -1119,4 +1119,4 @@ if __name__ == "__main__":
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
               args.mode, args.aug_type,
               args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch,
-              not args.mlp_no_freq_enc, not args.mlp_no_excl)
+              not args.mlp_raw, not args.mlp_keep_center)
