@@ -413,11 +413,14 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
                 with torch.no_grad():
                     val_out = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
                     val_loss = torch.nn.functional.mse_loss(val_out, vgt).item()
+                    raw_pred = torch.stack([vpx.squeeze(-1), vpy.squeeze(-1), vpz.squeeze(-1)], dim=-1)
+                    raw_loss = torch.nn.functional.mse_loss(raw_pred, vgt).item()
             else:
                 val_loss = float("nan")
+                raw_loss = float("nan")
 
             if epoch % 10 == 0 or epoch == mlp_epochs - 1:
-                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f}")
+                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f} raw={raw_loss:.4f}")
 
     # save
     model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}"
@@ -750,26 +753,27 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     else:
         base_name = f"alpha_cali{excl_suffix}_merged_eps_{eps_name}"
 
-    json_path = os.path.join(out_dir, f"{base_name}.json")
-    with open(json_path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"  → {json_path}")
+    if not train_mlp:
+        json_path = os.path.join(out_dir, f"{base_name}.json")
+        with open(json_path, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"  → {json_path}")
 
-    # CSV
-    csv_rows = []
-    for key in ["x", "y", "z"]:
-        for cell in alpha_table[key]["grid"]:
-            csv_rows.append(cell)
-    if csv_rows:
-        csv_path = os.path.join(out_dir, f"{base_name}.csv")
-        with open(csv_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
-            w.writeheader()
-            w.writerows(csv_rows)
-        print(f"  → {csv_path}")
+        # CSV
+        csv_rows = []
+        for key in ["x", "y", "z"]:
+            for cell in alpha_table[key]["grid"]:
+                csv_rows.append(cell)
+        if csv_rows:
+            csv_path = os.path.join(out_dir, f"{base_name}.csv")
+            with open(csv_path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
+                w.writeheader()
+                w.writerows(csv_rows)
+            print(f"  → {csv_path}")
 
     # ── per-epsilon alpha tables (FGSM only) ──
-    if mode == "fgsm":
+    if mode == "fgsm" and not train_mlp:
         for eps in epsilons:
             k = str(eps)
             if not calib_preds[k][0]:
@@ -859,54 +863,55 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                     w.writerows(ep_rows)
                 print(f"  → {ep_csv} ({len(ep_rows)} cells)")
 
-    # calibration curve
-    curve_path = os.path.join(out_dir, "calibration_curve.png")
-    _plot_calibration_curve(calibration, curve_path)
-    print(f"  → {curve_path}")
+    if not train_mlp:
+        # calibration curve
+        curve_path = os.path.join(out_dir, "calibration_curve.png")
+        _plot_calibration_curve(calibration, curve_path)
+        print(f"  → {curve_path}")
 
-    # ── supplementary analyses ──
-    if excl_active:
-        c_pred_ax = analysis_p_ax
-        c_gt_ax   = analysis_g_ax
-        c_ts_ax   = analysis_t_ax
-    else:
-        c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
-        c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
-        c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
+        # ── supplementary analyses ──
+        if excl_active:
+            c_pred_ax = analysis_p_ax
+            c_gt_ax   = analysis_g_ax
+            c_ts_ax   = analysis_t_ax
+        else:
+            c_pred_ax = [np.concatenate([np.atleast_1d(x) for x in merged_p[ax]]) for ax in range(3)]
+            c_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_g[ax]]) for ax in range(3)]
+            c_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in merged_t[ax]]) for ax in range(3)]
 
-    # clean
-    # pred edges from main alpha table (used also for mini tables)
-    pred_edge_map = {k: alpha_table[k]["pred_edges"] for k in ["x", "y", "z"]}
+        # clean
+        # pred edges from main alpha table (used also for mini tables)
+        pred_edge_map = {k: alpha_table[k]["pred_edges"] for k in ["x", "y", "z"]}
 
-    tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct,
-                                         pred_edges_dict=pred_edge_map)
-    _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins_eff,
-                                   os.path.join(out_dir, "alpha_correct_vs_unc.png"))
-    _plot_ct_vs_uncertainty_for(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins,
-                                os.path.join(out_dir, "ct_vs_uncertainty.png"))
-    _plot_gt_conditioned_for(c_pred_ax, c_gt_ax,
-                             os.path.join(out_dir, "gt_conditioned.png"))
+        tbl_clean = _build_mini_alpha_table(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, std_bins, trim_pct,
+                                             pred_edges_dict=pred_edge_map)
+        _plot_alpha_correct_vs_unc_for(c_pred_ax, c_gt_ax, c_ts_ax, tbl_clean, n_ts_bins_eff,
+                                       os.path.join(out_dir, "alpha_correct_vs_unc.png"))
+        _plot_ct_vs_uncertainty_for(c_pred_ax, c_gt_ax, c_ts_ax, gr, step, n_ts_bins,
+                                    os.path.join(out_dir, "ct_vs_uncertainty.png"))
+        _plot_gt_conditioned_for(c_pred_ax, c_gt_ax,
+                                 os.path.join(out_dir, "gt_conditioned.png"))
 
-    # per epsilon
-    for eps in epsilons:
-        k = str(eps)
-        if calib_counts[k][0] == 0:
-            continue
-        e_pred_ax = [np.concatenate([np.atleast_1d(x) for x in calib_preds[k][ax]]) for ax in range(3)]
-        e_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]])   for ax in range(3)]
-        e_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]])    for ax in range(3)]
-        tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, std_bins, trim_pct,
-                                         pred_edges_dict=pred_edge_map)
-        tag = f"eps_{k}"
-        _plot_alpha_correct_vs_unc_for(e_pred_ax, e_gt_ax, e_ts_ax, tbl_e, n_ts_bins,
-                                       os.path.join(out_dir, f"alpha_correct_vs_unc_{tag}.png"))
-        _plot_ct_vs_uncertainty_for(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, n_ts_bins,
-                                    os.path.join(out_dir, f"ct_vs_uncertainty_{tag}.png"))
-        _plot_gt_conditioned_for(e_pred_ax, e_gt_ax,
-                                 os.path.join(out_dir, f"gt_conditioned_{tag}.png"))
+        # per epsilon
+        for eps in epsilons:
+            k = str(eps)
+            if calib_counts[k][0] == 0:
+                continue
+            e_pred_ax = [np.concatenate([np.atleast_1d(x) for x in calib_preds[k][ax]]) for ax in range(3)]
+            e_gt_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_gts[k][ax]])   for ax in range(3)]
+            e_ts_ax   = [np.concatenate([np.atleast_1d(x) for x in calib_ts[k][ax]])    for ax in range(3)]
+            tbl_e = _build_mini_alpha_table(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, std_bins, trim_pct,
+                                             pred_edges_dict=pred_edge_map)
+            tag = f"eps_{k}"
+            _plot_alpha_correct_vs_unc_for(e_pred_ax, e_gt_ax, e_ts_ax, tbl_e, n_ts_bins,
+                                           os.path.join(out_dir, f"alpha_correct_vs_unc_{tag}.png"))
+            _plot_ct_vs_uncertainty_for(e_pred_ax, e_gt_ax, e_ts_ax, gr, step, n_ts_bins,
+                                        os.path.join(out_dir, f"ct_vs_uncertainty_{tag}.png"))
+            _plot_gt_conditioned_for(e_pred_ax, e_gt_ax,
+                                     os.path.join(out_dir, f"gt_conditioned_{tag}.png"))
 
 
-# ── supplementary analyses (shared across clean + per-ε) ─────────────────────
+    # ── supplementary analyses (shared across clean + per-ε) ─────────────────────
 
 def _build_mini_alpha_table(pred_by_ax, gt_by_ax, ts_by_ax, gr, step, std_bins, trim_pct, pred_edges_dict=None):
     """Build per-axis alpha table from (pred, gt, ts) arrays. Returns {ax: lookup_dict}."""
