@@ -436,10 +436,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                 _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
 
             n_images += 1
-            # training step
-            if train_mlp and len(mlp_buffer) >= mlp_batch:
-                _mlp_train_step(mlp_model, mlp_optim, mlp_buffer, device)
-                mlp_buffer.clear()
             continue
 
         # --- FGSM loop ---
@@ -492,10 +488,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
 
         n_images += 1
-        # training step
-        if train_mlp and len(mlp_buffer) >= mlp_batch:
-            _mlp_train_step(mlp_model, mlp_optim, mlp_buffer, device)
-            mlp_buffer.clear()
 
     # --- merge attacked data across epsilons for alpha table ---
     merged_p, merged_g, merged_t = [], [], []
@@ -513,6 +505,42 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     n_alpha = sum(len(x) for x in merged_p[0])
     print(f"\nProcessed {n_images} images, merged alpha pixels: {n_alpha} per axis")
+
+    # --- MLP epoch training ---
+    if train_mlp and len(mlp_buffer) > 0:
+        print(f"  MLP training: {len(mlp_buffer)} images, {mlp_epochs} epochs, batch={mlp_batch}, lr={mlp_lr}")
+        n_train = int(0.8 * len(mlp_buffer))
+        val_buf = mlp_buffer[n_train:]
+        train_buf = mlp_buffer[:n_train]
+
+        for epoch in range(mlp_epochs):
+            perm = torch.randperm(n_train)
+            total_loss, n_steps = 0.0, 0
+            for start in range(0, n_train, mlp_batch):
+                end = min(start + mlp_batch, n_train)
+                batch = [train_buf[i] for i in perm[start:end].tolist()]
+                loss = _mlp_train_step(mlp_model, mlp_optim, batch, device)
+                total_loss += loss
+                n_steps += 1
+
+            # validation
+            mlp_model.eval()
+            val_tx = torch.cat([torch.tensor(d["tx"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_px = torch.cat([torch.tensor(d["px"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_ty = torch.cat([torch.tensor(d["ty"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_py = torch.cat([torch.tensor(d["py"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_tz = torch.cat([torch.tensor(d["tz"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_pz = torch.cat([torch.tensor(d["pz"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
+            val_gt = torch.stack([
+                torch.cat([torch.tensor(d["gx"], dtype=torch.float32) for d in val_buf]),
+                torch.cat([torch.tensor(d["gy"], dtype=torch.float32) for d in val_buf]),
+                torch.cat([torch.tensor(d["gz"], dtype=torch.float32) for d in val_buf]),
+            ], dim=-1).to(device)
+            with torch.no_grad():
+                val_pred = mlp_model(val_tx, val_px, val_ty, val_py, val_tz, val_pz)
+                val_loss = torch.nn.functional.mse_loss(val_pred, val_gt).item()
+            if epoch % 10 == 0 or epoch == mlp_epochs - 1:
+                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f}")
 
     # --- per-axis center exclusion filter ---
     excl_active = all(x is not None for x in [excl_cx, excl_cy, excl_cz, excl_rx, excl_ry, excl_rz])
