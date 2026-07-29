@@ -654,66 +654,70 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             rob["ts_adv_mean"] = float(np.mean(ts_adv_list[k]))
         robustness[k] = rob
 
-    # --- build 2D alpha table per axis (merged attacked data, fixed std edges) ---
-    ts_edges = np.array([0.0] + list(std_bins) + [np.inf])
-    n_ts_bins_eff = len(ts_edges) - 1
-
+    n_total = 0
+    n_ts_bins_eff = 0
     alpha_table = {}
-    for ax_idx, key in enumerate(["x", "y", "z"]):
-        mp = np.concatenate([np.atleast_1d(x) for x in merged_p[ax_idx]])
-        mg = np.concatenate([np.atleast_1d(x) for x in merged_g[ax_idx]])
-        mt = np.concatenate([np.atleast_1d(x) for x in merged_t[ax_idx]])
+    if not train_mlp:
+    # --- build 2D alpha table per axis (merged attacked data, fixed std edges) ---
+        ts_edges = np.array([0.0] + list(std_bins) + [np.inf])
+        n_ts_bins_eff = len(ts_edges) - 1
 
-        eps_ = 1e-3
-        valid = np.abs(mp) >= eps_
-        if valid.sum() < 10:
-            alpha_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
-            continue
+        alpha_table = {}
+        for ax_idx, key in enumerate(["x", "y", "z"]):
+            mp = np.concatenate([np.atleast_1d(x) for x in merged_p[ax_idx]])
+            mg = np.concatenate([np.atleast_1d(x) for x in merged_g[ax_idx]])
+            mt = np.concatenate([np.atleast_1d(x) for x in merged_t[ax_idx]])
 
-        pv, gv, tv = mp[valid], mg[valid], mt[valid]
-        alpha_v = (gv - pv) / (pv * tv + 1e-12)
+            eps_ = 1e-3
+            valid = np.abs(mp) >= eps_
+            if valid.sum() < 10:
+                alpha_table[key] = {"grid": [], "total_std_edges": [], "pred_edges": []}
+                continue
 
-        gr_ax = gr[key]
-        if excl_active:
-            p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
-        else:
-            inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
-            p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
+            pv, gv, tv = mp[valid], mg[valid], mt[valid]
+            alpha_v = (gv - pv) / (pv * tv + 1e-12)
 
-        grid = []
-        for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
-            m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
-            for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
-                m_p = (pv >= plo) & (pv < phi)
-                m = m_t & m_p
-                if m.sum() < 5:
-                    continue
-                a = alpha_v[m]
-                if m.sum() >= 10:
-                    lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
-                    a_ma = a[(a >= lo_a) & (a <= hi_a)]
-                else:
-                    a_ma = a
-                grid.append({
-                    "total_std_bin": i,  "total_std_lo": float(tlo),  "total_std_hi": float(thi),
-                    "pred_bin":      j,  "pred_lo":      float(plo),  "pred_hi":      float(phi),
-                    "n": int(m.sum()),
-                    "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
-                    "mean_GT": float(gv[m].mean()),
-                    "mean_pred": float(pv[m].mean()),
-                    "mean_total_std": float(tv[m].mean()),
-                    "axis": key,
-                    "eps": eps_name,
-                })
+            gr_ax = gr[key]
+            if excl_active:
+                p_edges = _build_excl_pred_edges(gr_ax, excl_centers[ax_idx], excl_radii[ax_idx], excl_n_pred_bins)
+            else:
+                inner = np.linspace(gr_ax[0], gr_ax[1], n_pred_bins + 1)
+                p_edges = np.concatenate([[-np.inf], inner, [np.inf]])
 
-        alpha_table[key] = {
-            "grid": grid,
-            "total_std_edges": [float(e) for e in ts_edges],
-            "pred_edges": [float(e) for e in p_edges],
-        }
+            grid = []
+            for i, (tlo, thi) in enumerate(zip(ts_edges[:-1], ts_edges[1:])):
+                m_t = (tv >= tlo) & (tv < thi) if thi == np.inf else (tv >= tlo)
+                for j, (plo, phi) in enumerate(zip(p_edges[:-1], p_edges[1:])):
+                    m_p = (pv >= plo) & (pv < phi)
+                    m = m_t & m_p
+                    if m.sum() < 5:
+                        continue
+                    a = alpha_v[m]
+                    if m.sum() >= 10:
+                        lo_a, hi_a = np.percentile(a, [trim_pct * 100, (1 - trim_pct) * 100])
+                        a_ma = a[(a >= lo_a) & (a <= hi_a)]
+                    else:
+                        a_ma = a
+                    grid.append({
+                        "total_std_bin": i,  "total_std_lo": float(tlo),  "total_std_hi": float(thi),
+                        "pred_bin":      j,  "pred_lo":      float(plo),  "pred_hi":      float(phi),
+                        "n": int(m.sum()),
+                        "mean_alpha": float(a_ma.mean()), "std_alpha": float(a.std()),
+                        "mean_GT": float(gv[m].mean()),
+                        "mean_pred": float(pv[m].mean()),
+                        "mean_total_std": float(tv[m].mean()),
+                        "axis": key,
+                        "eps": eps_name,
+                    })
 
-    n_total = sum(len(mp) for mp in merged_p[0:1])
-    print(f"  table: {sum(len(t['grid']) for t in alpha_table.values())} cells, {n_total} pixels/axis")
+            alpha_table[key] = {
+                "grid": grid,
+                "total_std_edges": [float(e) for e in ts_edges],
+                "pred_edges": [float(e) for e in p_edges],
+            }
+
+        n_total = sum(len(mp) for mp in merged_p[0:1])
+        print(f"  table: {sum(len(t['grid']) for t in alpha_table.values())} cells, {n_total} pixels/axis")
 
     # --- calibration reliability (alpha vs coverage per epsilon) ---
     calibration = {}
@@ -1105,11 +1109,11 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["fgsm", "augmix"], default="fgsm")
     parser.add_argument("--aug_type", default=None, help="SpaceAugTransform aug_type (default: from cfg.yaml)")
     parser.add_argument("--train_mlp", action="store_true", help="Train AlphaMLP after calibration")
-    parser.add_argument("--mlp_epochs", type=int, default=100, help="MLP training epochs")
+    parser.add_argument("--mlp_epochs", type=int, default=1000, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
-    parser.add_argument("--mlp_raw", action="store_true", default=False, help="Use raw features (no freq encoding) in MLP")
-    parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
+    parser.add_argument("--mlp_raw", action="store_true", default=True, help="Use raw features (no freq encoding) in MLP")
+    parser.add_argument("--mlp_keep_center", action="store_true", default=True, help="Keep center pixels in MLP training (no exclusion)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
