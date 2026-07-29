@@ -29,37 +29,38 @@ class FreqEmbed(nn.Module):
 
 
 class UnifiedCorrectionMLP(nn.Module):
-    """6 features → MLP → 3 (corrected xyz).  Optional freq encoding."""
+    """Feature-mode MLP → 3 (corrected xyz). Optional freq encoding."""
 
-    def __init__(self, use_freq_enc: bool = True):
+    def __init__(self, use_freq_enc: bool = True, feature_mode: str = "all"):
         super().__init__()
         self.use_freq_enc = use_freq_enc
+        self.feature_mode = feature_mode
+        if feature_mode == "ts_only":
+            n_feat = 3
+        else:
+            n_feat = 6
+        in_dim = n_feat * (2 * 10) if use_freq_enc else n_feat
         if use_freq_enc:
             self.embed = FreqEmbed(10)
-            self.mlp = nn.Sequential(
-                nn.Linear(120, 256),
-                nn.Linear(256, 128),
-                nn.Linear(128, 64),
-                nn.Linear(64, 3),
-            )
         else:
             self.embed = None
-            self.mlp = nn.Sequential(
-                nn.Linear(6, 256),
-                nn.Linear(256, 128),
-                nn.Linear(128, 64),
-                nn.Linear(64, 3),
-            )
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 3),
+        )
 
     def forward(self, tx, px, ty, py, tz, pz):
-        if self.use_freq_enc:
-            feat = torch.cat([
-                self.embed(tx), self.embed(px),
-                self.embed(ty), self.embed(py),
-                self.embed(tz), self.embed(pz),
-            ], dim=-1)
+        if self.feature_mode == "ts_only":
+            feat_list = [tx, ty, tz]
         else:
-            feat = torch.cat([tx, px, ty, py, tz, pz], dim=-1)
+            feat_list = [tx, px, ty, py, tz, pz]
+
+        if self.use_freq_enc:
+            feat = torch.cat([self.embed(f) for f in feat_list], dim=-1)
+        else:
+            feat = torch.cat(feat_list, dim=-1)
         return self.mlp(feat)
 
 
@@ -162,10 +163,11 @@ def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
 
 def load_correction_mlp(pt_path: str, device: str = "cuda:0"):
     state = torch.load(pt_path, map_location=device, weights_only=True)
-    # auto-detect architecture: first linear layer input dim
     w0 = state["mlp.0.weight"]  # (256, in_dim)
-    use_freq = w0.shape[1] == 120
-    model = UnifiedCorrectionMLP(use_freq_enc=use_freq)
+    in_dim = w0.shape[1]
+    use_freq = in_dim in (60, 120)
+    ts_only = in_dim in (3, 60)
+    model = UnifiedCorrectionMLP(use_freq_enc=use_freq, feature_mode="ts_only" if ts_only else "all")
     model.load_state_dict(state)
     model.to(device)
     model.eval()

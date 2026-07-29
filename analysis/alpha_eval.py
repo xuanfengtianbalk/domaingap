@@ -102,11 +102,13 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
         tz_t = torch.tensor(total_std[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
         pz_t = torch.tensor(coords_np[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
         with torch.no_grad():
-            corrected_3d = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)  # (N, 3)
-        corr_np = corrected_3d.cpu().numpy()
-        coords_np[0, mid] = corr_np[:, 0]
-        coords_np[1, mid] = corr_np[:, 1]
-        coords_np[2, mid] = corr_np[:, 2]
+            delta_3d = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)  # (N, 3) correction
+        delta_np = delta_3d.cpu().numpy()
+        raw_np = np.stack([coords_np[0][mid], coords_np[1][mid], coords_np[2][mid]], axis=-1)
+        corrected_np = raw_np + delta_np
+        coords_np[0, mid] = corrected_np[:, 0]
+        coords_np[1, mid] = corrected_np[:, 1]
+        coords_np[2, mid] = corrected_np[:, 2]
     else:
         for ax_idx, key in enumerate(["x", "y", "z"]):
             ts_ax = total_std[ax_idx]
