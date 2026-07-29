@@ -89,73 +89,60 @@ def train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
               "y": AlphaMLPSingle().to(device),
               "z": AlphaMLPSingle().to(device)}
 
-    # flatten all data per axis
-    all_data = {}
-    for ax_idx, ax_name in enumerate(["x", "y", "z"]):
-        pred_list, gt_list, ts_list = [], [], []
-        for eps_key in epsilons:
-            k = str(eps_key)
-            for arr in calib_preds[k][ax_idx]:
-                pred_list.append(np.atleast_1d(arr))
-                gt_list.append(np.atleast_1d(calib_gts[k][ax_idx][0] if len(calib_gts[k][ax_idx]) <= len(pred_list) else calib_gts[k][ax_idx][len(pred_list)-1]))
-        # Flatten: calib_preds[k][ax] is a list of per-image arrays
-        flat_pred, flat_gt, flat_ts = [], [], []
-        for k in epsilons:
-            k = str(k)
-            for i in range(len(calib_preds[k][ax_idx])):
-                p = calib_preds[k][ax_idx][i]
-                g = calib_gts[k][ax_idx][i]
-                t = calib_ts[k][ax_idx][i]
-                flat_pred.append(np.atleast_1d(p).ravel())
-                flat_gt.append(np.atleast_1d(g).ravel())
-                flat_ts.append(np.atleast_1d(t).ravel())
+    # build per-axis per-image arrays
+    eps = 1e-3
+    models = {"x": AlphaMLPSingle().to(device),
+              "y": AlphaMLPSingle().to(device),
+              "z": AlphaMLPSingle().to(device)}
 
-        all_pred = np.concatenate(flat_pred)
-        all_gt   = np.concatenate(flat_gt)
-        all_ts   = np.concatenate(flat_ts)
+    # build image-indexed data per axis
+    axis_images = {"x": [], "y": [], "z": []}
+    for k in epsilons:
+        k = str(k)
+        n_imgs = len(calib_preds[k][0])
+        for i in range(n_imgs):
+            for ax_idx, ax_name in enumerate(["x", "y", "z"]):
+                p = np.atleast_1d(calib_preds[k][ax_idx][i]).ravel()
+                g = np.atleast_1d(calib_gts[k][ax_idx][i]).ravel()
+                t = np.atleast_1d(calib_ts[k][ax_idx][i]).ravel()
+                valid = np.abs(p) >= eps
+                if valid.sum() > 0:
+                    axis_images[ax_name].append((p[valid], g[valid], t[valid]))
 
-        # filter |pred| < eps
-        valid = np.abs(all_pred) >= eps
-        all_data[ax_name] = {
-            "pred": torch.tensor(all_pred[valid], dtype=torch.float32),
-            "gt":   torch.tensor(all_gt[valid], dtype=torch.float32),
-            "ts":   torch.tensor(all_ts[valid], dtype=torch.float32),
-        }
-
-    n_total = len(all_data["x"]["pred"])
-    n_images = sum(len(calib_preds[str(epsilons[0])][0]) for _ in [0]) if epsilons else 0
-    print(f"  MLP training: {n_total} pixels, {epochs} epochs, lr={lr}")
+    n_imgs_x = len(axis_images["x"])
+    print(f"  MLP training: {n_imgs_x} images/axis, {epochs} epochs, lr={lr}, batch={batch_size} images")
 
     for ax_name, model in models.items():
-        data = all_data[ax_name]
-        pred_all = data["pred"].to(device)
-        gt_all   = data["gt"].to(device)
-        ts_all   = data["ts"].to(device)
-
-        alpha_true = (gt_all - pred_all) / (pred_all * ts_all + 1e-12)
-
-        n = len(pred_all)
-        idx = torch.randperm(n)
-        n_train = int(0.8 * n)
-        idx_train, idx_val = idx[:n_train], idx[n_train:]
+        imgs = axis_images[ax_name]
+        n_imgs = len(imgs)
+        n_train = int(0.8 * n_imgs)
+        n_val = n_imgs - n_train
 
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+
+        # prepare val set (all val images at once)
+        val_pred = torch.cat([torch.tensor(imgs[i][0], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
+        val_gt   = torch.cat([torch.tensor(imgs[i][1], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
+        val_ts   = torch.cat([torch.tensor(imgs[i][2], dtype=torch.float32) for i in range(n_train, n_imgs)]).to(device)
+        alpha_val = (val_gt - val_pred) / (val_pred * val_ts + 1e-12)
 
         best_loss = float("inf")
         for epoch in range(epochs):
             model.train()
             perm = torch.randperm(n_train)
             total_loss = 0.0
-            batches = 0
-            # batch by images: approximate by random sampling equal-sized chunks
-            chunk_size = 4096
-            for start in range(0, n_train, chunk_size):
-                end = min(start + chunk_size, n_train)
-                idx_b = idx_train[perm[start:end]]
-                ts_b   = ts_all[idx_b]
-                pred_b = pred_all[idx_b]
-                alpha_b = alpha_true[idx_b]
+            n_batches = 0
+
+            for start in range(0, n_train, batch_size):
+                end = min(start + batch_size, n_train)
+                idx = perm[start:end].tolist()
+
+                # concat selected images
+                pred_b = torch.cat([torch.tensor(imgs[i][0], dtype=torch.float32) for i in idx]).to(device)
+                gt_b   = torch.cat([torch.tensor(imgs[i][1], dtype=torch.float32) for i in idx]).to(device)
+                ts_b   = torch.cat([torch.tensor(imgs[i][2], dtype=torch.float32) for i in idx]).to(device)
+                alpha_b = (gt_b - pred_b) / (pred_b * ts_b + 1e-12)
 
                 pred_out = model(ts_b, pred_b)
                 loss = nn.functional.mse_loss(pred_out, alpha_b)
@@ -164,18 +151,17 @@ def train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
-                batches += 1
+                n_batches += 1
 
             scheduler.step()
 
-            # validation
             model.eval()
             with torch.no_grad():
-                val_out = model(ts_all[idx_val], pred_all[idx_val])
-                val_loss = nn.functional.mse_loss(val_out, alpha_true[idx_val]).item()
+                val_out = model(val_ts, val_pred)
+                val_loss = nn.functional.mse_loss(val_out, alpha_val).item()
 
             if epoch % 20 == 0 or epoch == epochs - 1:
-                print(f"    {ax_name} epoch {epoch:3d}: train_loss={total_loss/batches:.4f} val_loss={val_loss:.4f}")
+                print(f"    {ax_name} epoch {epoch:3d}: train_loss={total_loss/n_batches:.4f} val_loss={val_loss:.4f}")
             if val_loss < best_loss:
                 best_loss = val_loss
 

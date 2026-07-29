@@ -280,7 +280,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               excl_cx: float = None, excl_cy: float = None, excl_cz: float = None,
               excl_rx: float = None, excl_ry: float = None, excl_rz: float = None,
               mode: str = "fgsm", aug_type: str = None,
-              train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3):
+              train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3,
+              mlp_batch: int = 16):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -474,7 +475,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     if train_mlp:
         from alpha_mlp import train_alpha_mlp
         mlp_state = train_alpha_mlp(calib_preds, calib_gts, calib_ts, epsilons,
-                                     device=device, epochs=mlp_epochs, lr=mlp_lr)
+                                     device=device, epochs=mlp_epochs, lr=mlp_lr, batch_size=mlp_batch)
 
     # --- robustness stats ---
     robustness = {}
@@ -944,6 +945,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_mlp", action="store_true", help="Train AlphaMLP after calibration")
     parser.add_argument("--mlp_epochs", type=int, default=100, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
+    parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -952,4 +954,4 @@ if __name__ == "__main__":
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device,
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
               args.mode, args.aug_type,
-              args.train_mlp, args.mlp_epochs, args.mlp_lr)
+              args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch)
