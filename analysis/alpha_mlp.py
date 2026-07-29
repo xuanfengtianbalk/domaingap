@@ -61,7 +61,8 @@ class UnifiedCorrectionMLP(nn.Module):
             feat = torch.cat([self.embed(f) for f in feat_list], dim=-1)
         else:
             feat = torch.cat(feat_list, dim=-1)
-        return self.mlp(feat)
+        delta = self.mlp(feat)
+        return torch.stack([px.squeeze(-1), py.squeeze(-1), pz.squeeze(-1)], dim=-1) + delta
 
 
 def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,

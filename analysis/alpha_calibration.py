@@ -378,9 +378,8 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
             ], dim=-1).to(device)
 
             raw_pred_train = torch.stack([px_t.squeeze(-1), py_t.squeeze(-1), pz_t.squeeze(-1)], dim=-1)
-            delta_out = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)
-            corrected = raw_pred_train + delta_out
-            loss = loss_fn(corrected, gt_b)
+            pred_out = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)
+            loss = loss_fn(pred_out, gt_b)
             raw_loss_train = loss_fn(raw_pred_train, gt_b).item()
 
             optimizer.zero_grad()
@@ -437,10 +436,9 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
                     torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gz]),
                 ], dim=-1).to(device)
                 with torch.no_grad():
+                    val_out = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
+                    val_loss = loss_fn(val_out, vgt).item()
                     raw_pred = torch.stack([vpx.squeeze(-1), vpy.squeeze(-1), vpz.squeeze(-1)], dim=-1)
-                    val_delta = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
-                    val_corrected = raw_pred + val_delta
-                    val_loss = loss_fn(val_corrected, vgt).item()
                     raw_loss = loss_fn(raw_pred, vgt).item()
             else:
                 val_loss = float("nan")
