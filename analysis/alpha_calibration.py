@@ -302,7 +302,7 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     n_steps_per_epoch = max(1, n_train // mlp_batch)
     freq_str = "raw" if not mlp_freq_enc else "freq"
     excl_str = "excl" if mlp_excl else "noexcl"
-    print(f"  MLP [{freq_str},{excl_str},{mlp_loss}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
+    print(f"  MLP [{freq_str},{excl_str},{mlp_loss},lr={mlp_lr}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
 
     eps = 1e-3
     cx, cy, cz = 0.045, 0.057, 0.16
@@ -443,11 +443,11 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
                 val_loss = float("nan")
                 raw_loss = float("nan")
 
-            if epoch % 10 == 0 or epoch == mlp_epochs - 1:
+            if True:  # print every epoch
                 print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f}(raw={total_raw/n_steps:.4f}) val={val_loss:.4f}(raw={raw_loss:.4f})")
 
     # save
-    model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}"
+    model_name = f"alpha_mlp_{mode}_{aug_type}_{mlp_loss}_lr{mlp_lr}_raw{int(not mlp_freq_enc)}_keep{int(mlp_excl)}{excl_suffix}"
     pt_path = os.path.join(out_dir, f"{model_name}.pt")
     torch.save(mlp_model.state_dict(), pt_path)
     print(f"  → {pt_path}")
@@ -1129,7 +1129,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=5,
+    parser.add_argument("--max_samples", type=int, default=100,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
@@ -1141,10 +1141,10 @@ if __name__ == "__main__":
     parser.add_argument("--aug_type", default=None, help="SpaceAugTransform aug_type (default: from cfg.yaml)")
     parser.add_argument("--train_mlp", action="store_true", help="Train AlphaMLP after calibration")
     parser.add_argument("--mlp_epochs", type=int, default=1000, help="MLP training epochs")
-    parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
+    parser.add_argument("--mlp_lr", type=float, default=1e-4, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
     parser.add_argument("--mlp_raw", action="store_true", default=False, help="Use raw features (no freq encoding) in MLP")
-    parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
+    parser.add_argument("--mlp_keep_center", action="store_true", default=True, help="Keep center pixels in MLP training (no exclusion)")
     parser.add_argument("--mlp_loss", choices=["l1", "l2", "smooth_l1"], default="l2",
                         help="Loss function for MLP training")
     parser.add_argument("--device", default="cuda:0")
