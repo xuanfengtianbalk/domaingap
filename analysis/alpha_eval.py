@@ -576,7 +576,7 @@ if __name__ == "__main__":
     parser.add_argument("--uuid", default=None,
                         help="Model UUID (default: pairwise.uuid_1 from config.yaml)")
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", \
-                        "alpha_cali_augmix_augmix_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05.csv"))
+                        "alpha_c.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
     parser.add_argument("--max_samples", type=int, default=100)
     parser.add_argument("--std_min", type=float, default=0.01,

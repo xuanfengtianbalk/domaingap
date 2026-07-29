@@ -273,53 +273,157 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
     plt.close()
 
 
-# ── MLP helpers ────────────────────────────────────────────────────────────────
+# ── MLP independent training ───────────────────────────────────────────────────
 
-def _collect_mlp_batch(buffer, full_adv, total_std_adv, coors_gt, m_valid):
-    """Collect per-image aligned pixels into buffer for online MLP training."""
+def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
+                           excl_suffix, mode, out_dir, max_samples):
+    """Train MLP on augmix data using independent dataloader."""
+    from alpha_mlp import UnifiedCorrectionMLP
+    from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
+    from analysis_utils import build_dataloader
+
+    augmentor = SpaceAugTransform(aug_type, styleaug_p=0.0)
+    mlp_model = UnifiedCorrectionMLP().to(device)
+    optimizer = torch.optim.Adam(mlp_model.parameters(), lr=mlp_lr)
+
+    dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
+    imgs = list(dl)
+    n_total = len(imgs)
+    n_train = int(0.8 * n_total)
+
+    n_steps_per_epoch = max(1, n_train // mlp_batch)
+    print(f"  MLP independent training: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
+
     eps = 1e-3
-    pred = full_adv["coords"][0].numpy()   # (3, H, W)
-    gt   = coors_gt[0].numpy()
+    for epoch in range(mlp_epochs):
+        mlp_model.train()
+        total_loss, n_steps = 0.0, 0
+        perm = torch.randperm(n_train)
 
-    if total_std_adv.ndim == 3:            # per-axis (3, H, W)
-        ts = total_std_adv
-    else:
-        ts = total_std_adv.squeeze(0)       # (3, H, W) from batched
+        for start in range(0, n_train, mlp_batch):
+            end = min(start + mlp_batch, n_train)
+            idx = perm[start:end].tolist()
 
-    px = pred[0][m_valid]; py = pred[1][m_valid]; pz = pred[2][m_valid]
-    gx = gt[0][m_valid]; gy = gt[1][m_valid]; gz = gt[2][m_valid]
-    tx = ts[0][m_valid]; ty = ts[1][m_valid]; tz = ts[2][m_valid]
+            all_px, all_py, all_pz = [], [], []
+            all_tx, all_ty, all_tz = [], [], []
+            all_gx, all_gy, all_gz = [], [], []
 
-    valid = (np.abs(px) >= eps) & (np.abs(py) >= eps) & (np.abs(pz) >= eps)
-    if valid.sum() > 0:
-        buffer.append({
-            "px": px[valid], "py": py[valid], "pz": pz[valid],
-            "gx": gx[valid], "gy": gy[valid], "gz": gz[valid],
-            "tx": tx[valid], "ty": ty[valid], "tz": tz[valid],
-        })
+            for i in idx:
+                samples, targets = imgs[i]
+                image = samples.to(device)
+                mask = targets["mask_gt"][0] > 0.5
 
+                # augmix
+                img_np = (image.cpu().squeeze(0).permute(1,2,0).numpy() * 255).clip(0, 255).astype(np.uint8)
+                aug_np = augmentor(image=img_np)["image"]
+                aug_tensor = torch.from_numpy(aug_np.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0).to(device)
 
-def _mlp_train_step(model, optimizer, buffer, device):
-    """Online training step: one backward on concatenated batch."""
-    model.train()
-    all_tx = torch.cat([torch.tensor(d["tx"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_px = torch.cat([torch.tensor(d["px"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_ty = torch.cat([torch.tensor(d["ty"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_py = torch.cat([torch.tensor(d["py"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_tz = torch.cat([torch.tensor(d["tz"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_pz = torch.cat([torch.tensor(d["pz"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
-    all_gx = torch.cat([torch.tensor(d["gx"], dtype=torch.float32) for d in buffer]).to(device)
-    all_gy = torch.cat([torch.tensor(d["gy"], dtype=torch.float32) for d in buffer]).to(device)
-    all_gz = torch.cat([torch.tensor(d["gz"], dtype=torch.float32) for d in buffer]).to(device)
-    all_gt = torch.stack([all_gx, all_gy, all_gz], dim=-1)
+                with torch.no_grad(), torch.amp.autocast("cuda"):
+                    out = model(aug_tensor)
 
-    pred_out = model(all_tx, all_px, all_ty, all_py, all_tz, all_pz)
-    loss = torch.nn.functional.mse_loss(pred_out, all_gt)
+                pred = out["c"].squeeze(0).cpu().numpy()
+                gt   = targets["coors_gt"][0].numpy()
 
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+                logl = out["logl"].squeeze(0).cpu().numpy()
+                loga = out["loga"].squeeze(0).cpu().numpy()
+                logb = out["logb"].squeeze(0).cpu().numpy()
+                a = np.exp(loga) + 1.0 + 1e-6
+                b_v = np.exp(logb) + 1e-6
+                v = np.exp(logl) + 1e-6
+                epi_var = b_v / ((a - 1 + 1e-12) * (v + 1e-12))
+                alea_var = b_v / (a - 1 + 1e-12)
+                ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+
+                m = mask.numpy()
+                vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
+                if not vv.any():
+                    continue
+
+                all_px.append(pred[0,m][vv]); all_py.append(pred[1,m][vv]); all_pz.append(pred[2,m][vv])
+                all_tx.append(ts_3d[0,m][vv]); all_ty.append(ts_3d[1,m][vv]); all_tz.append(ts_3d[2,m][vv])
+                all_gx.append(gt[0,m][vv]); all_gy.append(gt[1,m][vv]); all_gz.append(gt[2,m][vv])
+
+            if not all_px:
+                continue
+
+            px_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_px]).to(device)
+            py_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_py]).to(device)
+            pz_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_pz]).to(device)
+            tx_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_tx]).to(device)
+            ty_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_ty]).to(device)
+            tz_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_tz]).to(device)
+            gt_b = torch.stack([
+                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gx]),
+                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gy]),
+                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gz]),
+            ], dim=-1).to(device)
+
+            pred_out = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)
+            loss = torch.nn.functional.mse_loss(pred_out, gt_b)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            n_steps += 1
+
+        # validation
+        if n_steps > 0:
+            mlp_model.eval()
+            val_px, val_py, val_pz, val_tx, val_ty, val_tz, val_gx, val_gy, val_gz = [], [], [], [], [], [], [], [], []
+            for i in range(n_train, n_total):
+                samples, targets = imgs[i]
+                image = samples.to(device)
+                mask = targets["mask_gt"][0] > 0.5
+                img_np = (image.cpu().squeeze(0).permute(1,2,0).numpy() * 255).clip(0, 255).astype(np.uint8)
+                aug_np = augmentor(image=img_np)["image"]
+                aug_tensor = torch.from_numpy(aug_np.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0).to(device)
+                with torch.no_grad(), torch.amp.autocast("cuda"):
+                    out = model(aug_tensor)
+                pred = out["c"].squeeze(0).cpu().numpy()
+                gt   = targets["coors_gt"][0].numpy()
+                logl = out["logl"].squeeze(0).cpu().numpy()
+                loga = out["loga"].squeeze(0).cpu().numpy()
+                logb = out["logb"].squeeze(0).cpu().numpy()
+                a_v = np.exp(loga) + 1.0 + 1e-6
+                bv = np.exp(logb) + 1e-6
+                vl = np.exp(logl) + 1e-6
+                ep = bv / ((a_v - 1 + 1e-12) * (vl + 1e-12))
+                al = bv / (a_v - 1 + 1e-12)
+                ts = np.sqrt(np.maximum(ep + al, 0.0))
+                m = mask.numpy()
+                vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
+                if not vv.any(): continue
+                val_px.append(pred[0,m][vv]); val_py.append(pred[1,m][vv]); val_pz.append(pred[2,m][vv])
+                val_tx.append(ts[0,m][vv]); val_ty.append(ts[1,m][vv]); val_tz.append(ts[2,m][vv])
+                val_gx.append(gt[0,m][vv]); val_gy.append(gt[1,m][vv]); val_gz.append(gt[2,m][vv])
+
+            if val_px:
+                vtx = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_tx]).to(device)
+                vpx = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_px]).to(device)
+                vty = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_ty]).to(device)
+                vpy = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_py]).to(device)
+                vtz = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_tz]).to(device)
+                vpz = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_pz]).to(device)
+                vgt = torch.stack([
+                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gx]),
+                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gy]),
+                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gz]),
+                ], dim=-1).to(device)
+                with torch.no_grad():
+                    val_out = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
+                    val_loss = torch.nn.functional.mse_loss(val_out, vgt).item()
+            else:
+                val_loss = float("nan")
+
+            if epoch % 10 == 0 or epoch == mlp_epochs - 1:
+                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f}")
+
+    # save
+    model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}"
+    pt_path = os.path.join(out_dir, f"{model_name}.pt")
+    torch.save(mlp_model.state_dict(), pt_path)
+    print(f"  → {pt_path}")
 
 
 # ── main calibration ─────────────────────────────────────────────────────────
@@ -357,12 +461,12 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
 
     # --- augmix transform (if mode == "augmix") ---
+    if aug_type is None:
+        train_cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "cfg.yaml")
+        with open(train_cfg_path) as f:
+            train_cfg = _yaml.safe_load(f)
+        aug_type = train_cfg.get("AUG_TYPE", "augmix")
     if mode == "augmix":
-        if aug_type is None:
-            train_cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "cfg.yaml")
-            with open(train_cfg_path) as f:
-                train_cfg = _yaml.safe_load(f)
-            aug_type = train_cfg.get("AUG_TYPE", "augmix")
         from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
         aug_transform = SpaceAugTransform(aug_type, styleaug_p=0.5)
         epsilons = ["0"]
@@ -379,16 +483,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     calib_gts   = {str(e): [[], [], []] for e in epsilons}
     calib_ts    = {str(e): [[], [], []] for e in epsilons}
     calib_counts = {str(e): [0, 0, 0] for e in epsilons}
-
-    # --- MLP online training setup ---
-    mlp_model = None
-    mlp_optim = None
-    mlp_buffer = []
-    if train_mlp:
-        from alpha_mlp import UnifiedCorrectionMLP
-        mlp_model = UnifiedCorrectionMLP().to(device)
-        mlp_optim = torch.optim.Adam(mlp_model.parameters(), lr=mlp_lr)
-        print(f"  MLP online training: batch={mlp_batch} images, lr={mlp_lr}")
 
     n_images = 0
     for samples, targets in tqdm(dl, desc="Calibrating", ncols=80):
@@ -430,10 +524,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                     calib_gts[k][ax].append(coors_gt[0, ax, m_valid].numpy()[idx])
                     calib_ts[k][ax].append(ts_pix_adv[ax][idx])
                     calib_counts[k][ax] += take
-
-            # --- MLP online data collection ---
-            if train_mlp:
-                _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
 
             n_images += 1
             continue
@@ -483,10 +573,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             if total_std_adv is not None:
                 ts_adv_list[k].append(float(np.nanmean(total_std_adv)))
 
-        # --- MLP online data collection ---
-        if train_mlp:
-            _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
-
         n_images += 1
 
     # --- merge attacked data across epsilons for alpha table ---
@@ -505,42 +591,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     n_alpha = sum(len(x) for x in merged_p[0])
     print(f"\nProcessed {n_images} images, merged alpha pixels: {n_alpha} per axis")
-
-    # --- MLP epoch training ---
-    if train_mlp and len(mlp_buffer) > 0:
-        print(f"  MLP training: {len(mlp_buffer)} images, {mlp_epochs} epochs, batch={mlp_batch}, lr={mlp_lr}")
-        n_train = int(0.8 * len(mlp_buffer))
-        val_buf = mlp_buffer[n_train:]
-        train_buf = mlp_buffer[:n_train]
-
-        for epoch in range(mlp_epochs):
-            perm = torch.randperm(n_train)
-            total_loss, n_steps = 0.0, 0
-            for start in range(0, n_train, mlp_batch):
-                end = min(start + mlp_batch, n_train)
-                batch = [train_buf[i] for i in perm[start:end].tolist()]
-                loss = _mlp_train_step(mlp_model, mlp_optim, batch, device)
-                total_loss += loss
-                n_steps += 1
-
-            # validation
-            mlp_model.eval()
-            val_tx = torch.cat([torch.tensor(d["tx"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_px = torch.cat([torch.tensor(d["px"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_ty = torch.cat([torch.tensor(d["ty"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_py = torch.cat([torch.tensor(d["py"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_tz = torch.cat([torch.tensor(d["tz"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_pz = torch.cat([torch.tensor(d["pz"], dtype=torch.float32).reshape(-1,1) for d in val_buf]).to(device)
-            val_gt = torch.stack([
-                torch.cat([torch.tensor(d["gx"], dtype=torch.float32) for d in val_buf]),
-                torch.cat([torch.tensor(d["gy"], dtype=torch.float32) for d in val_buf]),
-                torch.cat([torch.tensor(d["gz"], dtype=torch.float32) for d in val_buf]),
-            ], dim=-1).to(device)
-            with torch.no_grad():
-                val_pred = mlp_model(val_tx, val_px, val_ty, val_py, val_tz, val_pz)
-                val_loss = torch.nn.functional.mse_loss(val_pred, val_gt).item()
-            if epoch % 10 == 0 or epoch == mlp_epochs - 1:
-                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f}")
 
     # --- per-axis center exclusion filter ---
     excl_active = all(x is not None for x in [excl_cx, excl_cy, excl_cz, excl_rx, excl_ry, excl_rz])
@@ -676,13 +726,10 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
     os.makedirs(out_dir, exist_ok=True)
 
-    # save trained MLP if available
-    if train_mlp and mlp_model is not None:
-        import torch as _t
-        model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}" if mode == "augmix" else f"alpha_mlp_fgsm{excl_suffix}"
-        pt_path = os.path.join(out_dir, f"{model_name}.pt")
-        _t.save(mlp_model.state_dict(), pt_path)
-        print(f"  → {pt_path}")
+    # train MLP (independent augmix dataloader)
+    if train_mlp:
+        _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
+                               excl_suffix, mode, out_dir, max_samples)
 
     result = {
         "metadata": {
