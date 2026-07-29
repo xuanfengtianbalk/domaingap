@@ -273,6 +273,55 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
     plt.close()
 
 
+# ── MLP helpers ────────────────────────────────────────────────────────────────
+
+def _collect_mlp_batch(buffer, full_adv, total_std_adv, coors_gt, m_valid):
+    """Collect per-image aligned pixels into buffer for online MLP training."""
+    eps = 1e-3
+    pred = full_adv["coords"][0].numpy()   # (3, H, W)
+    gt   = coors_gt[0].numpy()
+
+    if total_std_adv.ndim == 3:            # per-axis (3, H, W)
+        ts = total_std_adv
+    else:
+        ts = total_std_adv.squeeze(0)       # (3, H, W) from batched
+
+    px = pred[0][m_valid]; py = pred[1][m_valid]; pz = pred[2][m_valid]
+    gx = gt[0][m_valid]; gy = gt[1][m_valid]; gz = gt[2][m_valid]
+    tx = ts[0][m_valid]; ty = ts[1][m_valid]; tz = ts[2][m_valid]
+
+    valid = (np.abs(px) >= eps) & (np.abs(py) >= eps) & (np.abs(pz) >= eps)
+    if valid.sum() > 0:
+        buffer.append({
+            "px": px[valid], "py": py[valid], "pz": pz[valid],
+            "gx": gx[valid], "gy": gy[valid], "gz": gz[valid],
+            "tx": tx[valid], "ty": ty[valid], "tz": tz[valid],
+        })
+
+
+def _mlp_train_step(model, optimizer, buffer, device):
+    """Online training step: one backward on concatenated batch."""
+    model.train()
+    all_tx = torch.cat([torch.tensor(d["tx"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_px = torch.cat([torch.tensor(d["px"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_ty = torch.cat([torch.tensor(d["ty"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_py = torch.cat([torch.tensor(d["py"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_tz = torch.cat([torch.tensor(d["tz"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_pz = torch.cat([torch.tensor(d["pz"], dtype=torch.float32).reshape(-1, 1) for d in buffer]).to(device)
+    all_gx = torch.cat([torch.tensor(d["gx"], dtype=torch.float32) for d in buffer]).to(device)
+    all_gy = torch.cat([torch.tensor(d["gy"], dtype=torch.float32) for d in buffer]).to(device)
+    all_gz = torch.cat([torch.tensor(d["gz"], dtype=torch.float32) for d in buffer]).to(device)
+    all_gt = torch.stack([all_gx, all_gy, all_gz], dim=-1)
+
+    pred_out = model(all_tx, all_px, all_ty, all_py, all_tz, all_pz)
+    loss = torch.nn.functional.mse_loss(pred_out, all_gt)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+
 # ── main calibration ─────────────────────────────────────────────────────────
 
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
@@ -324,12 +373,22 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     dist_list  = {str(e): [] for e in epsilons}
     ts_adv_list   = {str(e): [] for e in epsilons}
 
-    # Per-epsilon calibration accumulators (sampled)
-    max_calib_pix = 5_000_000 if train_mlp else 200_000
-    calib_preds = {str(e): [[], [], []] for e in epsilons}   # {eps: [ax0_list, ax1_list, ax2_list]}
+    # Per-epsilon calibration accumulators (for CSV alpha table only)
+    max_calib_pix = 200_000
+    calib_preds = {str(e): [[], [], []] for e in epsilons}
     calib_gts   = {str(e): [[], [], []] for e in epsilons}
     calib_ts    = {str(e): [[], [], []] for e in epsilons}
-    calib_counts = {str(e): [0, 0, 0] for e in epsilons}     # pixels collected per axis
+    calib_counts = {str(e): [0, 0, 0] for e in epsilons}
+
+    # --- MLP online training setup ---
+    mlp_model = None
+    mlp_optim = None
+    mlp_buffer = []
+    if train_mlp:
+        from alpha_mlp import UnifiedCorrectionMLP
+        mlp_model = UnifiedCorrectionMLP().to(device)
+        mlp_optim = torch.optim.Adam(mlp_model.parameters(), lr=mlp_lr)
+        print(f"  MLP online training: batch={mlp_batch} images, lr={mlp_lr}")
 
     n_images = 0
     for samples, targets in tqdm(dl, desc="Calibrating", ncols=80):
@@ -372,7 +431,15 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
                     calib_ts[k][ax].append(ts_pix_adv[ax][idx])
                     calib_counts[k][ax] += take
 
+            # --- MLP online data collection ---
+            if train_mlp:
+                _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
+
             n_images += 1
+            # training step
+            if train_mlp and len(mlp_buffer) >= mlp_batch:
+                _mlp_train_step(mlp_model, mlp_optim, mlp_buffer, device)
+                mlp_buffer.clear()
             continue
 
         # --- FGSM loop ---
@@ -420,7 +487,15 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             if total_std_adv is not None:
                 ts_adv_list[k].append(float(np.nanmean(total_std_adv)))
 
+        # --- MLP online data collection ---
+        if train_mlp:
+            _collect_mlp_batch(mlp_buffer, full_adv, total_std_adv, coors_gt, m_valid)
+
         n_images += 1
+        # training step
+        if train_mlp and len(mlp_buffer) >= mlp_batch:
+            _mlp_train_step(mlp_model, mlp_optim, mlp_buffer, device)
+            mlp_buffer.clear()
 
     # --- merge attacked data across epsilons for alpha table ---
     merged_p, merged_g, merged_t = [], [], []
@@ -469,13 +544,6 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
         analysis_g_ax = [mg_flat[ax][shared_keep] for ax in range(3)]
         analysis_t_ax = [mt_flat[ax][shared_keep] for ax in range(3)]
         print(f"  shared mask for analyses: {shared_keep.sum()} pixels remain")
-
-    # --- train AlphaMLP (optional) ---
-    mlp_state = None
-    if train_mlp:
-        from alpha_mlp import train_correction_mlp
-        mlp_state = train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
-                                          device=device, epochs=mlp_epochs, lr=mlp_lr, batch_size=mlp_batch)
 
     # --- robustness stats ---
     robustness = {}
@@ -581,11 +649,11 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     os.makedirs(out_dir, exist_ok=True)
 
     # save trained MLP if available
-    if train_mlp and mlp_state is not None:
+    if train_mlp and mlp_model is not None:
         import torch as _t
         model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}" if mode == "augmix" else f"alpha_mlp_fgsm{excl_suffix}"
         pt_path = os.path.join(out_dir, f"{model_name}.pt")
-        _t.save(mlp_state, pt_path)
+        _t.save(mlp_model.state_dict(), pt_path)
         print(f"  → {pt_path}")
 
     result = {
@@ -932,7 +1000,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=10000,
+    parser.add_argument("--max_samples", type=int, default=1000,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
