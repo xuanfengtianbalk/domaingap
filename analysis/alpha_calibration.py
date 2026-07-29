@@ -277,11 +277,18 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
 
 def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
                            excl_suffix, mode, out_dir, max_samples,
-                           mlp_freq_enc=True, mlp_excl=True):
+                           mlp_freq_enc=True, mlp_excl=True, mlp_loss="l2"):
     """Train MLP on augmix data using independent dataloader."""
     from alpha_mlp import UnifiedCorrectionMLP
     from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
     from analysis_utils import build_dataloader
+
+    if mlp_loss == "l1":
+        loss_fn = torch.nn.functional.l1_loss
+    elif mlp_loss == "smooth_l1":
+        loss_fn = torch.nn.functional.smooth_l1_loss
+    else:
+        loss_fn = torch.nn.functional.mse_loss
 
     augmentor = SpaceAugTransform(aug_type, styleaug_p=0.0)
     mlp_model = UnifiedCorrectionMLP(use_freq_enc=mlp_freq_enc).to(device)
@@ -295,7 +302,7 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     n_steps_per_epoch = max(1, n_train // mlp_batch)
     freq_str = "raw" if not mlp_freq_enc else "freq"
     excl_str = "excl" if mlp_excl else "noexcl"
-    print(f"  MLP [{freq_str},{excl_str}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
+    print(f"  MLP [{freq_str},{excl_str},{mlp_loss}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
 
     eps = 1e-3
     cx, cy, cz = 0.045, 0.057, 0.16
@@ -303,7 +310,7 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
 
     for epoch in range(mlp_epochs):
         mlp_model.train()
-        total_loss, n_steps = 0.0, 0
+        total_loss, total_raw, n_steps = 0.0, 0.0, 0
         perm = torch.randperm(n_train)
 
         for start in range(0, n_train, mlp_batch):
@@ -370,12 +377,15 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
             ], dim=-1).to(device)
 
             pred_out = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)
-            loss = torch.nn.functional.mse_loss(pred_out, gt_b)
+            loss = loss_fn(pred_out, gt_b)
+            raw_pred_train = torch.stack([px_t.squeeze(-1), py_t.squeeze(-1), pz_t.squeeze(-1)], dim=-1)
+            raw_loss_train = loss_fn(raw_pred_train, gt_b).item()
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            total_raw += raw_loss_train
             n_steps += 1
 
         # validation
@@ -426,15 +436,15 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
                 ], dim=-1).to(device)
                 with torch.no_grad():
                     val_out = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
-                    val_loss = torch.nn.functional.mse_loss(val_out, vgt).item()
+                    val_loss = loss_fn(val_out, vgt).item()
                     raw_pred = torch.stack([vpx.squeeze(-1), vpy.squeeze(-1), vpz.squeeze(-1)], dim=-1)
-                    raw_loss = torch.nn.functional.mse_loss(raw_pred, vgt).item()
+                    raw_loss = loss_fn(raw_pred, vgt).item()
             else:
                 val_loss = float("nan")
                 raw_loss = float("nan")
 
             if epoch % 10 == 0 or epoch == mlp_epochs - 1:
-                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f} val={val_loss:.4f} raw={raw_loss:.4f}")
+                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f}(raw={total_raw/n_steps:.4f}) val={val_loss:.4f}(raw={raw_loss:.4f})")
 
     # save
     model_name = f"alpha_mlp_{mode}_{aug_type}{excl_suffix}"
@@ -451,7 +461,8 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               excl_rx: float = None, excl_ry: float = None, excl_rz: float = None,
               mode: str = "fgsm", aug_type: str = None,
               train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3,
-              mlp_batch: int = 16, mlp_freq_enc: bool = True, mlp_excl: bool = True):
+              mlp_batch: int = 16, mlp_freq_enc: bool = True, mlp_excl: bool = True,
+              mlp_loss: str = "l2"):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -750,7 +761,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # train MLP (independent augmix dataloader)
     if train_mlp:
         _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
-                               excl_suffix, mode, out_dir, max_samples, mlp_freq_enc, mlp_excl)
+                               excl_suffix, mode, out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
 
     result = {
         "metadata": {
@@ -1098,7 +1109,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=10,
+    parser.add_argument("--max_samples", type=int, default=50,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
@@ -1112,8 +1123,10 @@ if __name__ == "__main__":
     parser.add_argument("--mlp_epochs", type=int, default=1000, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
-    parser.add_argument("--mlp_raw", action="store_true", default=True, help="Use raw features (no freq encoding) in MLP")
-    parser.add_argument("--mlp_keep_center", action="store_true", default=True, help="Keep center pixels in MLP training (no exclusion)")
+    parser.add_argument("--mlp_raw", action="store_true", default=False, help="Use raw features (no freq encoding) in MLP")
+    parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
+    parser.add_argument("--mlp_loss", choices=["l1", "l2", "smooth_l1"], default="smooth_l1",
+                        help="Loss function for MLP training")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -1123,4 +1136,4 @@ if __name__ == "__main__":
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
               args.mode, args.aug_type,
               args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch,
-              not args.mlp_raw, not args.mlp_keep_center)
+              not args.mlp_raw, not args.mlp_keep_center, args.mlp_loss)
