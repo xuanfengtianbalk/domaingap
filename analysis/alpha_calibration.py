@@ -488,6 +488,26 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # Dataloader
     dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
 
+    # --- early return: MLP-only mode ---
+    if train_mlp:
+        # ensure aug_type is set
+        _at = aug_type
+        if _at is None:
+            _train_cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "cfg.yaml")
+            with open(_train_cfg_path) as _f:
+                _train_cfg = _yaml.safe_load(_f)
+            _at = _train_cfg.get("AUG_TYPE", "augmix")
+        _excl_active = all(x is not None for x in [excl_cx, excl_cy, excl_cz, excl_rx, excl_ry, excl_rz])
+        _excl_suffix = ""
+        if _excl_active:
+            _excl_suffix = f"_excl_cx{excl_cx}_cy{excl_cy}_cz{excl_cz}_rx{excl_rx}_ry{excl_ry}_rz{excl_rz}"
+        _out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
+        os.makedirs(_out_dir, exist_ok=True)
+        _train_mlp_independent(uuid, model, device, _at, mlp_epochs, mlp_batch, mlp_lr,
+                               _excl_suffix, mode, _out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
+        return
+
+
     # --- augmix transform (if mode == "augmix") ---
     if aug_type is None:
         train_cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "cfg.yaml")
