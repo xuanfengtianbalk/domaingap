@@ -276,14 +276,15 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
 # ── MLP independent training ───────────────────────────────────────────────────
 
 def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
-                           excl_suffix, mode, out_dir, max_samples):
+                           excl_suffix, mode, out_dir, max_samples,
+                           mlp_freq_enc=True, mlp_excl=True):
     """Train MLP on augmix data using independent dataloader."""
     from alpha_mlp import UnifiedCorrectionMLP
     from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
     from analysis_utils import build_dataloader
 
     augmentor = SpaceAugTransform(aug_type, styleaug_p=0.0)
-    mlp_model = UnifiedCorrectionMLP().to(device)
+    mlp_model = UnifiedCorrectionMLP(use_freq_enc=mlp_freq_enc).to(device)
     optimizer = torch.optim.Adam(mlp_model.parameters(), lr=mlp_lr)
 
     dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
@@ -292,9 +293,14 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     n_train = int(0.8 * n_total)
 
     n_steps_per_epoch = max(1, n_train // mlp_batch)
-    print(f"  MLP independent training: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
+    freq_str = "raw" if not mlp_freq_enc else "freq"
+    excl_str = "excl" if mlp_excl else "noexcl"
+    print(f"  MLP [{freq_str},{excl_str}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
 
     eps = 1e-3
+    cx, cy, cz = 0.045, 0.057, 0.16
+    rx, ry, rz = 0.05, 0.05, 0.05
+
     for epoch in range(mlp_epochs):
         mlp_model.train()
         total_loss, n_steps = 0.0, 0
@@ -336,6 +342,11 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
 
                 m = mask.numpy()
                 vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
+                if not vv.any():
+                    continue
+                # exclusion filter (optional)
+                if mlp_excl:
+                    vv &= (np.abs(pred[0,m] - cx) >= rx) | (np.abs(pred[1,m] - cy) >= ry) | (np.abs(pred[2,m] - cz) >= rz)
                 if not vv.any():
                     continue
 
@@ -394,6 +405,9 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
                 m = mask.numpy()
                 vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
                 if not vv.any(): continue
+                if mlp_excl:
+                    vv &= (np.abs(pred[0,m] - cx) >= rx) | (np.abs(pred[1,m] - cy) >= ry) | (np.abs(pred[2,m] - cz) >= rz)
+                if not vv.any(): continue
                 val_px.append(pred[0,m][vv]); val_py.append(pred[1,m][vv]); val_pz.append(pred[2,m][vv])
                 val_tx.append(ts[0,m][vv]); val_ty.append(ts[1,m][vv]); val_tz.append(ts[2,m][vv])
                 val_gx.append(gt[0,m][vv]); val_gy.append(gt[1,m][vv]); val_gz.append(gt[2,m][vv])
@@ -437,7 +451,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               excl_rx: float = None, excl_ry: float = None, excl_rz: float = None,
               mode: str = "fgsm", aug_type: str = None,
               train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3,
-              mlp_batch: int = 16):
+              mlp_batch: int = 16, mlp_freq_enc: bool = True, mlp_excl: bool = True):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -732,7 +746,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
     # train MLP (independent augmix dataloader)
     if train_mlp:
         _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
-                               excl_suffix, mode, out_dir, max_samples)
+                               excl_suffix, mode, out_dir, max_samples, mlp_freq_enc, mlp_excl)
 
     result = {
         "metadata": {
@@ -1080,7 +1094,7 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=1000,
+    parser.add_argument("--max_samples", type=int, default=10,
                         help="Max validation images")
     parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
     parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
@@ -1094,6 +1108,8 @@ if __name__ == "__main__":
     parser.add_argument("--mlp_epochs", type=int, default=100, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-3, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
+    parser.add_argument("--mlp_no_freq_enc", action="store_true", default=False, help="Disable freq encoding in MLP")
+    parser.add_argument("--mlp_no_excl", action="store_true", default=False, help="Disable exclusion filter for MLP")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -1102,4 +1118,5 @@ if __name__ == "__main__":
     calibrate(args.uuid, epsilons, args.n_ts_bins, args.max_samples, args.std_bins, args.device,
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
               args.mode, args.aug_type,
-              args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch)
+              args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch,
+              not args.mlp_no_freq_enc, not args.mlp_no_excl)
