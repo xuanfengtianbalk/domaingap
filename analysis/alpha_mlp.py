@@ -29,16 +29,12 @@ class FreqEmbed(nn.Module):
 
 
 class UnifiedCorrectionMLP(nn.Module):
-    """Feature-mode MLP → 3 (corrected xyz). Optional freq encoding."""
+    """6 features → delta → +raw pred → 3 (corrected xyz). Optional freq encoding."""
 
-    def __init__(self, use_freq_enc: bool = True, feature_mode: str = "all"):
+    def __init__(self, use_freq_enc: bool = True):
         super().__init__()
         self.use_freq_enc = use_freq_enc
-        self.feature_mode = feature_mode
-        if feature_mode == "ts_only":
-            n_feat = 3
-        else:
-            n_feat = 6
+        n_feat = 6
         in_dim = n_feat * (2 * 10) if use_freq_enc else n_feat
         if use_freq_enc:
             self.embed = FreqEmbed(10)
@@ -52,17 +48,14 @@ class UnifiedCorrectionMLP(nn.Module):
         )
 
     def forward(self, tx, px, ty, py, tz, pz):
-        if self.feature_mode == "ts_only":
-            feat_list = [tx, ty, tz]
-        else:
-            feat_list = [tx, px, ty, py, tz, pz]
-
+        feat_list = [tx, px, ty, py, tz, pz]
         if self.use_freq_enc:
             feat = torch.cat([self.embed(f) for f in feat_list], dim=-1)
         else:
             feat = torch.cat(feat_list, dim=-1)
         delta = self.mlp(feat)
-        return torch.stack([px.squeeze(-1), py.squeeze(-1), pz.squeeze(-1)], dim=-1) + delta
+        raw = torch.stack([px.squeeze(-1), py.squeeze(-1), pz.squeeze(-1)], dim=-1)
+        return raw + delta
 
 
 def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
@@ -164,11 +157,9 @@ def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
 
 def load_correction_mlp(pt_path: str, device: str = "cuda:0"):
     state = torch.load(pt_path, map_location=device, weights_only=True)
-    w0 = state["mlp.0.weight"]  # (256, in_dim)
-    in_dim = w0.shape[1]
-    use_freq = in_dim in (60, 120)
-    ts_only = in_dim in (3, 60)
-    model = UnifiedCorrectionMLP(use_freq_enc=use_freq, feature_mode="ts_only" if ts_only else "all")
+    w0 = state["mlp.0.weight"]
+    use_freq = w0.shape[1] > 10
+    model = UnifiedCorrectionMLP(use_freq_enc=use_freq)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
