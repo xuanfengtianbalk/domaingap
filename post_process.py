@@ -3,6 +3,7 @@ import numpy as np
 from numpy import sin, cos, sqrt
 import cv2
 from cv2 import solvePnP, solvePnPRansac
+from ucer_3d_pnp.LM import solve_pnp_lm
 
 
 def mask_to_display(mask_tensor):  # (W,H) -> (H,W)
@@ -25,6 +26,8 @@ def rotation_matrix_to_quaternion(r1, r2, r3):
     """
 
     theta = sqrt(r1 * r1 + r2 * r2 + r3 * r3);
+    if theta < 1e-10:
+        return [1.0, 0.0, 0.0, 0.0]
     qw = cos(theta * 0.5)
     qx = r1 * sin(theta * 0.5) / theta
     qy = r2 * sin(theta * 0.5) / theta
@@ -174,8 +177,63 @@ def pose_calculats_from_coors(cam_K, coors, gtbbox):
     else:
         return is_true, None, None
 
-def pose_calculats_from_kps(cam_K, p_body, p_frame):
+def pose_calculate_with_unc(cam_K, coors, unc, gtbbox=None):
+    """Uncertainty-weighted PnP: RANSAC init + LM refinement with per-pixel 3D unc.
 
+    coors: (H, W, 3) world coordinates per pixel
+    unc:   (H, W, 3) per-axis uncertainty (std) per pixel
+    gtbbox: optional (x_min, y_min, x_max, y_max) — map image points back
+            to original resolution like pose_calculats_from_coors
+    Returns (qvecs, tvecs, std)
+    """
+    object_points = []
+    image_points = []
+    unc_points = []
+    H, W, _ = coors.shape
+    if gtbbox is not None:
+        x_min, y_min = gtbbox[0], gtbbox[1]
+        crop_orig_W = gtbbox[2] - gtbbox[0]
+        crop_orig_H = gtbbox[3] - gtbbox[1]
+        scale_x = W / crop_orig_W
+        scale_y = H / crop_orig_H
+    for u in range(W):
+        for v in range(H):
+            # 提取有效像素点，忽略无效点（如NaN）
+            if not np.isnan(coors[v, u, 0]):  # 如果3D坐标有效
+                # 提取3D坐标
+                x, y, z = coors[v, u, :3]
+                dx, dy, dz = unc[v, u, :3]
+                object_points.append([x, y, z])
+                unc_points.append([dx, dy, dz])
+                if gtbbox is not None:
+                    image_points.append([u / scale_x + x_min, v / scale_y + y_min])
+                else:
+                    image_points.append([u, v])
+    object_points = np.array(object_points, dtype=np.float32)
+    image_points = np.array(image_points, dtype=np.float32)
+    unc_points = np.array(unc_points, dtype=np.float32)
+    unc_points = np.maximum(unc_points, 1e-6)  # floor for matrix invertibility
+    distCoeffs = np.zeros((4, 1), dtype=np.float32)
+    _, (r1, r2, r3), tvecs, inliers = solvePnPRansac(object_points, \
+                                                     image_points, \
+                                                     cam_K, \
+                                                     distCoeffs,
+                                                     iterationsCount=100,
+                                                     confidence=0.99,
+                                                     reprojectionError=8,
+                                                     flags=cv2.SOLVEPNP_ITERATIVE
+                                                     )
+    std = np.zeros(6)
+    (r1, r2, r3), tvecs, std = solve_pnp_lm(object_points[inliers[:, 0]], \
+                                            image_points[inliers[:, 0]], \
+                                            cam_K, \
+                                            unc_points[inliers[:, 0]], initial_rvec=np.array([r1[0], r2[0], r3[0]]), initial_tvec=tvecs[:, 0],
+                                            max_iter=1)
+    qvecs = rotation_matrix_to_quaternion(r1, r2, r3)
+    return qvecs, tvecs, std
+
+
+def pose_calculats_from_kps(cam_K, p_body, p_frame):
 
     for err_index in range(6):
         is_true, (r1, r2, r3), tvecs, inliers = solvePnPRansac(p_body[:, :-1].astype("float32"),

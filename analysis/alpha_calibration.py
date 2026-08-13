@@ -278,10 +278,10 @@ def _build_excl_pred_edges(gt_range, cx, rx, n_bins=10):
 def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
                            excl_suffix, mode, out_dir, max_samples,
                            mlp_freq_enc=True, mlp_excl=True, mlp_loss="l2"):
-    """Train MLP on augmix data using independent dataloader."""
+    """Train MLP on augmix data using proper DataLoader (like run.py)."""
     from alpha_mlp import UnifiedCorrectionMLP
     from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-    from analysis_utils import build_dataloader
+    from analysis_utils import build_mlp_dataloader
 
     if mlp_loss == "l1":
         loss_fn = torch.nn.functional.l1_loss
@@ -290,19 +290,15 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     else:
         loss_fn = torch.nn.functional.mse_loss
 
-    augmentor = SpaceAugTransform(aug_type, styleaug_p=0.0)
     mlp_model = UnifiedCorrectionMLP(use_freq_enc=mlp_freq_enc).to(device)
     optimizer = torch.optim.Adam(mlp_model.parameters(), lr=mlp_lr)
 
-    dl = build_dataloader(uuid, "validation", max_samples=max_samples, batch_size=1)
-    imgs = list(dl)
-    n_total = len(imgs)
-    n_train = int(0.8 * n_total)
+    train_loader, val_loader, n_total, n_train = build_mlp_dataloader(
+        uuid, aug_type, max_samples, mlp_batch)
 
-    n_steps_per_epoch = max(1, n_train // mlp_batch)
     freq_str = "raw" if not mlp_freq_enc else "freq"
     excl_str = "excl" if mlp_excl else "noexcl"
-    print(f"  MLP [{freq_str},{excl_str},{mlp_loss},lr={mlp_lr}]: {n_total} images ({n_train} train), {mlp_epochs} epochs, {n_steps_per_epoch} steps/epoch")
+    print(f"  MLP [{freq_str},{excl_str},{mlp_loss},lr={mlp_lr}]: {n_total} images ({n_train} train), {mlp_epochs} epochs")
 
     eps = 1e-3
     cx, cy, cz = 0.045, 0.057, 0.16
@@ -311,142 +307,94 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     for epoch in range(mlp_epochs):
         mlp_model.train()
         total_loss, total_raw, n_steps = 0.0, 0.0, 0
-        perm = torch.randperm(n_train)
 
-        for start in range(0, n_train, mlp_batch):
-            end = min(start + mlp_batch, n_train)
-            idx = perm[start:end].tolist()
+        for samples, targets in train_loader:
+            samples = samples.to(device)
 
-            all_px, all_py, all_pz = [], [], []
-            all_tx, all_ty, all_tz = [], [], []
-            all_gx, all_gy, all_gz = [], [], []
+            with torch.no_grad(), torch.amp.autocast("cuda"):
+                out = model(samples)
 
-            for i in idx:
-                samples, targets = imgs[i]
-                image = samples.to(device)
-                mask = targets["mask_gt"][0] > 0.5
+            pred = out['c']                          # [B, 3, H, W]
+            logl = out['logl']                       # [B, 3, H, W]
+            loga = out['loga']                       # [B, 3, H, W]
+            logb = out['logb']                       # [B, 3, H, W]
+            gt = targets['coors_gt'].to(device)      # [B, 3, H, W]
+            mask_b = targets['mask_gt'].to(device)   # [B, H, W]
 
-                # augmix
-                img_np = (image.cpu().squeeze(0).permute(1,2,0).numpy() * 255).clip(0, 255).astype(np.uint8)
-                aug_np = augmentor(image=img_np)["image"]
-                aug_tensor = torch.from_numpy(aug_np.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0).to(device)
+            a_v = torch.exp(loga) + 1.0 + 1e-6
+            b_v = torch.exp(logb) + 1e-6
+            v_l = torch.exp(logl) + 1e-6
+            epi = b_v / ((a_v - 1 + 1e-12) * (v_l + 1e-12))
+            alea = b_v / (a_v - 1 + 1e-12)
+            ts_3d = torch.sqrt(torch.clamp(epi + alea, min=0.0))  # [B, 3, H, W]
 
-                with torch.no_grad(), torch.amp.autocast("cuda"):
-                    out = model(aug_tensor)
-
-                pred = out["c"].squeeze(0).cpu().numpy()
-                gt   = targets["coors_gt"][0].numpy()
-
-                logl = out["logl"].squeeze(0).cpu().numpy()
-                loga = out["loga"].squeeze(0).cpu().numpy()
-                logb = out["logb"].squeeze(0).cpu().numpy()
-                a = np.exp(loga) + 1.0 + 1e-6
-                b_v = np.exp(logb) + 1e-6
-                v = np.exp(logl) + 1e-6
-                epi_var = b_v / ((a - 1 + 1e-12) * (v + 1e-12))
-                alea_var = b_v / (a - 1 + 1e-12)
-                ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
-
-                m = mask.numpy()
-                vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
-                if not vv.any():
-                    continue
-                # exclusion filter (optional)
-                if mlp_excl:
-                    vv &= (np.abs(pred[0,m] - cx) >= rx) | (np.abs(pred[1,m] - cy) >= ry) | (np.abs(pred[2,m] - cz) >= rz)
-                if not vv.any():
-                    continue
-
-                all_px.append(pred[0,m][vv]); all_py.append(pred[1,m][vv]); all_pz.append(pred[2,m][vv])
-                all_tx.append(ts_3d[0,m][vv]); all_ty.append(ts_3d[1,m][vv]); all_tz.append(ts_3d[2,m][vv])
-                all_gx.append(gt[0,m][vv]); all_gy.append(gt[1,m][vv]); all_gz.append(gt[2,m][vv])
-
-            if not all_px:
+            vv = (mask_b > 0.5) & (pred[:, 0].abs() >= eps) & (pred[:, 1].abs() >= eps) & (pred[:, 2].abs() >= eps)
+            if mlp_excl:
+                excl = ((pred[:, 0] - cx).abs() >= rx) | ((pred[:, 1] - cy).abs() >= ry) | ((pred[:, 2] - cz).abs() >= rz)
+                vv = vv & excl
+            if not vv.any():
                 continue
 
-            px_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_px]).to(device)
-            py_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_py]).to(device)
-            pz_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_pz]).to(device)
-            tx_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_tx]).to(device)
-            ty_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_ty]).to(device)
-            tz_t = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in all_tz]).to(device)
-            gt_b = torch.stack([
-                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gx]),
-                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gy]),
-                torch.cat([torch.tensor(x, dtype=torch.float32) for x in all_gz]),
-            ], dim=-1).to(device)
+            px_f = pred[:, 0][vv].unsqueeze(-1)
+            py_f = pred[:, 1][vv].unsqueeze(-1)
+            pz_f = pred[:, 2][vv].unsqueeze(-1)
+            tx_f = ts_3d[:, 0][vv].unsqueeze(-1)
+            ty_f = ts_3d[:, 1][vv].unsqueeze(-1)
+            tz_f = ts_3d[:, 2][vv].unsqueeze(-1)
+            gt_xyz = torch.stack([gt[:, 0][vv], gt[:, 1][vv], gt[:, 2][vv]], dim=-1)
 
-            raw_pred_train = torch.stack([px_t.squeeze(-1), py_t.squeeze(-1), pz_t.squeeze(-1)], dim=-1)
-            pred_out = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)
-            loss = loss_fn(pred_out, gt_b)
-            raw_loss_train = loss_fn(raw_pred_train, gt_b).item()
+            mlp_out = mlp_model(tx_f, px_f, ty_f, py_f, tz_f, pz_f)
+            loss = loss_fn(mlp_out, gt_xyz)
+
+            raw_out = torch.stack([px_f.squeeze(-1), py_f.squeeze(-1), pz_f.squeeze(-1)], dim=-1)
+            raw_loss = loss_fn(raw_out, gt_xyz).item()
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
             total_loss += loss.item()
-            total_raw += raw_loss_train
+            total_raw += raw_loss
             n_steps += 1
 
-        # validation
-        if n_steps > 0:
-            mlp_model.eval()
-            val_px, val_py, val_pz, val_tx, val_ty, val_tz, val_gx, val_gy, val_gz = [], [], [], [], [], [], [], [], []
-            for i in range(n_train, n_total):
-                samples, targets = imgs[i]
-                image = samples.to(device)
-                mask = targets["mask_gt"][0] > 0.5
-                img_np = (image.cpu().squeeze(0).permute(1,2,0).numpy() * 255).clip(0, 255).astype(np.uint8)
-                aug_np = augmentor(image=img_np)["image"]
-                aug_tensor = torch.from_numpy(aug_np.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0).to(device)
-                with torch.no_grad(), torch.amp.autocast("cuda"):
-                    out = model(aug_tensor)
-                pred = out["c"].squeeze(0).cpu().numpy()
-                gt   = targets["coors_gt"][0].numpy()
-                logl = out["logl"].squeeze(0).cpu().numpy()
-                loga = out["loga"].squeeze(0).cpu().numpy()
-                logb = out["logb"].squeeze(0).cpu().numpy()
-                a_v = np.exp(loga) + 1.0 + 1e-6
-                bv = np.exp(logb) + 1e-6
-                vl = np.exp(logl) + 1e-6
-                ep = bv / ((a_v - 1 + 1e-12) * (vl + 1e-12))
-                al = bv / (a_v - 1 + 1e-12)
-                ts = np.sqrt(np.maximum(ep + al, 0.0))
-                m = mask.numpy()
-                vv = (np.abs(pred[0,m]) >= eps) & (np.abs(pred[1,m]) >= eps) & (np.abs(pred[2,m]) >= eps)
-                if not vv.any(): continue
+        # --- validation ---
+        mlp_model.eval()
+        all_mlp, all_gt, all_raw = [], [], []
+        with torch.no_grad():
+            for samples, targets in val_loader:
+                samples = samples.to(device)
+                with torch.amp.autocast("cuda"):
+                    out = model(samples)
+                pred = out['c']; logl = out['logl']; loga = out['loga']; logb = out['logb']
+                gt_v = targets['coors_gt'].to(device); mask_v = targets['mask_gt'].to(device)
+                a_v = torch.exp(loga) + 1.0 + 1e-6
+                b_v = torch.exp(logb) + 1e-6; v_l = torch.exp(logl) + 1e-6
+                epi = b_v / ((a_v - 1 + 1e-12) * (v_l + 1e-12))
+                alea = b_v / (a_v - 1 + 1e-12)
+                ts = torch.sqrt(torch.clamp(epi + alea, min=0.0))
+                vv = (mask_v > 0.5) & (pred[:, 0].abs() >= eps) & (pred[:, 1].abs() >= eps) & (pred[:, 2].abs() >= eps)
                 if mlp_excl:
-                    vv &= (np.abs(pred[0,m] - cx) >= rx) | (np.abs(pred[1,m] - cy) >= ry) | (np.abs(pred[2,m] - cz) >= rz)
-                if not vv.any(): continue
-                val_px.append(pred[0,m][vv]); val_py.append(pred[1,m][vv]); val_pz.append(pred[2,m][vv])
-                val_tx.append(ts[0,m][vv]); val_ty.append(ts[1,m][vv]); val_tz.append(ts[2,m][vv])
-                val_gx.append(gt[0,m][vv]); val_gy.append(gt[1,m][vv]); val_gz.append(gt[2,m][vv])
+                    excl = ((pred[:, 0] - cx).abs() >= rx) | ((pred[:, 1] - cy).abs() >= ry) | ((pred[:, 2] - cz).abs() >= rz)
+                    vv = vv & excl
+                if not vv.any():
+                    continue
+                px_f = pred[:, 0][vv].unsqueeze(-1); py_f = pred[:, 1][vv].unsqueeze(-1); pz_f = pred[:, 2][vv].unsqueeze(-1)
+                tx_f = ts[:, 0][vv].unsqueeze(-1); ty_f = ts[:, 1][vv].unsqueeze(-1); tz_f = ts[:, 2][vv].unsqueeze(-1)
+                gt_xyz = torch.stack([gt_v[:, 0][vv], gt_v[:, 1][vv], gt_v[:, 2][vv]], dim=-1)
+                mlp_out_v = mlp_model(tx_f, px_f, ty_f, py_f, tz_f, pz_f)
+                raw_v = torch.stack([px_f.squeeze(-1), py_f.squeeze(-1), pz_f.squeeze(-1)], dim=-1)
+                all_mlp.append(mlp_out_v); all_gt.append(gt_xyz); all_raw.append(raw_v)
 
-            if val_px:
-                vtx = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_tx]).to(device)
-                vpx = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_px]).to(device)
-                vty = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_ty]).to(device)
-                vpy = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_py]).to(device)
-                vtz = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_tz]).to(device)
-                vpz = torch.cat([torch.tensor(x, dtype=torch.float32).reshape(-1,1) for x in val_pz]).to(device)
-                vgt = torch.stack([
-                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gx]),
-                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gy]),
-                    torch.cat([torch.tensor(x, dtype=torch.float32) for x in val_gz]),
-                ], dim=-1).to(device)
-                with torch.no_grad():
-                    val_out = mlp_model(vtx, vpx, vty, vpy, vtz, vpz)
-                    val_loss = loss_fn(val_out, vgt).item()
-                    raw_pred = torch.stack([vpx.squeeze(-1), vpy.squeeze(-1), vpz.squeeze(-1)], dim=-1)
-                    raw_loss = loss_fn(raw_pred, vgt).item()
-            else:
-                val_loss = float("nan")
-                raw_loss = float("nan")
+        if all_mlp:
+            val_all = torch.cat(all_mlp, dim=0); gt_all = torch.cat(all_gt, dim=0); raw_all = torch.cat(all_raw, dim=0)
+            val_loss = loss_fn(val_all, gt_all).item()
+            raw_val_loss = loss_fn(raw_all, gt_all).item()
+        else:
+            val_loss = float("nan"); raw_val_loss = float("nan")
 
-            if True:  # print every epoch
-                print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f}(raw={total_raw/n_steps:.4f}) val={val_loss:.4f}(raw={raw_loss:.4f})")
+        if n_steps > 0:
+            print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f}(raw={total_raw/n_steps:.4f}) val={val_loss:.4f}(raw={raw_val_loss:.4f})")
 
-    # save
     model_name = f"alpha_mlp_{mode}_{aug_type}_{mlp_loss}_lr{mlp_lr}_raw{int(not mlp_freq_enc)}_keep{int(mlp_excl)}{excl_suffix}"
     pt_path = os.path.join(out_dir, f"{model_name}.pt")
     torch.save(mlp_model.state_dict(), pt_path)
@@ -1129,22 +1077,25 @@ if __name__ == "__main__":
                         help="Number of total_std percentile bins (for plots only)")
     parser.add_argument("--std_bins", nargs="*", type=float,
                         default=None, help="Fixed total_std edges for alpha table")
-    parser.add_argument("--max_samples", type=int, default=100,
+    parser.add_argument("--max_samples", type=int, default=10000,
                         help="Max validation images")
-    parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
-    parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
-    parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion center Z")
+    # parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion center X")
+    # parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion center Y")
+    # parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion center Z")
+    parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
+    parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
+    parser.add_argument("--excl_cz", type=float, default=0.165, help="Exclusion zone center Z")
     parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion radius X")
     parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion radius Y")
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion radius Z")
     parser.add_argument("--mode", choices=["fgsm", "augmix"], default="fgsm")
     parser.add_argument("--aug_type", default=None, help="SpaceAugTransform aug_type (default: from cfg.yaml)")
     parser.add_argument("--train_mlp", action="store_true", help="Train AlphaMLP after calibration")
-    parser.add_argument("--mlp_epochs", type=int, default=1000, help="MLP training epochs")
+    parser.add_argument("--mlp_epochs", type=int, default=10, help="MLP training epochs")
     parser.add_argument("--mlp_lr", type=float, default=1e-4, help="MLP learning rate")
     parser.add_argument("--mlp_batch", type=int, default=16, help="MLP batch size (images per batch)")
     parser.add_argument("--mlp_raw", action="store_true", default=False, help="Use raw features (no freq encoding) in MLP")
-    parser.add_argument("--mlp_keep_center", action="store_true", default=True, help="Keep center pixels in MLP training (no exclusion)")
+    parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
     parser.add_argument("--mlp_loss", choices=["l1", "l2", "smooth_l1"], default="l2",
                         help="Loss function for MLP training")
     parser.add_argument("--device", default="cuda:0")

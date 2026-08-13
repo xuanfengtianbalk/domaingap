@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "dinov3_main"))
 
 from analysis_utils import load_model, build_dataloader
 from utils_datasets.speedplus_utils_main.utils import Camera
-from post_process import pose_calculats_from_coors, compute_pose_error, to_pnp_coors
+from post_process import pose_calculats_from_coors, compute_pose_error, to_pnp_coors, pose_calculate_with_unc
 
 
 # ── alpha table loader ───────────────────────────────────────────────────────
@@ -158,6 +158,38 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
     return float(err_ori_deg), float(err_r_abs), True
 
 
+def run_pnp_unc(coords_tensor: torch.Tensor, outputs_raw: dict, gtbbox: torch.Tensor,
+                qgt: torch.Tensor, rgt: torch.Tensor) -> tuple:
+    """Uncertainty-weighted PnP (RANSAC + LM) on given coords. Returns (angle_deg, dist_abs, std)."""
+    activate = torch.nn.Sigmoid()
+    c = coords_tensor.clone().detach()
+    mask_bool = (activate(outputs_raw["mask"]) > 0.5).expand_as(c).cpu()
+    c[~mask_bool] = float("nan")
+    coormap_np = to_pnp_coors(c.squeeze())
+
+    logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+    loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+    logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+    a_np = np.exp(loga) + 1.0 + 1e-6
+    b_np = np.exp(logb) + 1e-6
+    v_np = np.exp(logl) + 1e-6
+    epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+    alea_var = b_np / (a_np - 1 + 1e-12)
+    ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))  # (3, H, W)
+    unc_np = np.transpose(ts_3d, (1, 2, 0))               # (H, W, 3)
+
+    gtb = gtbbox.cpu().detach().numpy()
+    try:
+        qvecs, tvecs, std = pose_calculate_with_unc(Camera.K, coormap_np, unc_np, gtb)
+    except Exception:
+        return float("nan"), float("nan"), None
+
+    qg = qgt.squeeze().cpu()
+    rg = rgt.squeeze().cpu()
+    err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(qvecs, tvecs, qg, rg, True)
+    return float(err_ori_deg), float(err_r_abs), std
+
+
 # ── main eval ────────────────────────────────────────────────────────────────
 
 def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
@@ -218,6 +250,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         base_angles, base_dists = [], []
         excl_angles, excl_dists = [], []   # DER + exclusion filter
         corr_angles, corr_dists = [], []    # alpha corrected
+        unc_angles, unc_dists = [], []      # raw + uncertainty-weighted PnP
+        uncc_angles, uncc_dists = [], []    # corrected + uncertainty-weighted PnP
         per_image = []
         # per-pixel pred vs std collection (sampled)
         std_preds, std_ts, std_epi, std_alea = [], [], [], []
@@ -238,6 +272,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
             # ── baseline: raw DER, no filtering ──
             angle_base, dist_base, ok_base = run_pnp(outputs_raw, gtbbox, qgt, rgt)
+
+            # ── UNC: raw coords + uncertainty-weighted PnP ──
+            angle_unc, dist_unc, std_unc = run_pnp_unc(outputs_raw["c"], outputs_raw, gtbbox, qgt, rgt)
 
             # ── exclusion filter (shared for EXCLUDED + optional CORRECTED) ──
             angle_excl = dist_excl = ok_excl = None
@@ -289,6 +326,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             outputs_corr["c"] = coords_corr
             angle_corr, dist_corr, ok_corr = run_pnp(outputs_corr, gtbbox, qgt, rgt)
 
+            # ── UNC_CORR: corrected coords + uncertainty-weighted PnP ──
+            angle_uncc, dist_uncc, std_uncc = run_pnp_unc(coords_corr, outputs_raw, gtbbox, qgt, rgt)
+
             if ok_base:
                 base_angles.append(angle_base)
                 base_dists.append(dist_base)
@@ -298,6 +338,12 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             if ok_corr:
                 corr_angles.append(angle_corr)
                 corr_dists.append(dist_corr)
+            if std_unc is not None and np.isfinite(angle_unc):
+                unc_angles.append(angle_unc)
+                unc_dists.append(dist_unc)
+            if std_uncc is not None and np.isfinite(angle_uncc):
+                uncc_angles.append(angle_uncc)
+                uncc_dists.append(dist_uncc)
 
             # sample pixels for pred vs std plot (max ~5000 per image)
             c_np = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
@@ -325,6 +371,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 "angle_base": angle_base, "dist_base": dist_base,
                 "angle_excl": angle_excl, "dist_excl": dist_excl,
                 "angle_corr": angle_corr, "dist_corr": dist_corr,
+                "angle_unc": angle_unc, "dist_unc": dist_unc,
+                "std_unc": std_unc.tolist() if std_unc is not None else None,
+                "angle_uncc": angle_uncc, "dist_uncc": dist_uncc,
+                "std_uncc": std_uncc.tolist() if std_uncc is not None else None,
             })
 
         # aggregate
@@ -341,6 +391,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             "std_range": {"min": std_min, "max": std_max},
             "BASELINE":  {"angle": stats(base_angles), "dist": stats(base_dists)},
             "CORRECTED": {"angle": stats(corr_angles), "dist": stats(corr_dists)},
+            "UNC":       {"angle": stats(unc_angles), "dist": stats(unc_dists)},
+            "UNC_CORR":  {"angle": stats(uncc_angles), "dist": stats(uncc_dists)},
             "per_image": per_image,
         }
         if has_excl:
@@ -349,7 +401,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         base = os.path.join(out_dir, split)
         with open(f"{base}.json", "w") as f:
             json.dump(result, f, indent=2)
-        csv_fields = ["angle_base", "dist_base", "angle_excl", "dist_excl", "angle_corr", "dist_corr"]
+        csv_fields = ["angle_base", "dist_base", "angle_excl", "dist_excl", "angle_corr", "dist_corr",
+                      "angle_unc", "dist_unc", "angle_uncc", "dist_uncc"]
         with open(f"{base}.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
             w.writeheader()
@@ -360,6 +413,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         if has_excl:
             print(f"  EXCLUDED:   angle={result['EXCLUDED']['angle']['mean']:.2f}° ± {result['EXCLUDED']['angle']['std']:.2f}  dist={result['EXCLUDED']['dist']['mean']:.4f}  n={result['EXCLUDED']['angle']['n']}")
         print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
+        print(f"  UNC:        angle={result['UNC']['angle']['mean']:.2f}° ± {result['UNC']['angle']['std']:.2f}  dist={result['UNC']['dist']['mean']:.4f}  n={result['UNC']['angle']['n']}")
+        print(f"  UNC_CORR:   angle={result['UNC_CORR']['angle']['mean']:.2f}° ± {result['UNC_CORR']['angle']['std']:.2f}  dist={result['UNC_CORR']['dist']['mean']:.4f}  n={result['UNC_CORR']['angle']['n']}")
 
         # pred vs std plot
         if len(std_preds) > 0:
@@ -578,21 +633,21 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_csv", default=os.path.join(PROJECT_ROOT, "outputs", "alpha_cali", \
                         "alpha_c.csv"))
     parser.add_argument("--splits", nargs="*", default=["sunlamp", "lightbox"])
-    parser.add_argument("--max_samples", type=int, default=100)
-    parser.add_argument("--std_min", type=float, default=0.01,
+    parser.add_argument("--max_samples", type=int, default=10000)
+    parser.add_argument("--std_min", type=float, default=0.0,
                         help="Per-axis total_std lower bound (pixels outside → NaN)")
-    parser.add_argument("--std_max", type=float, default=5,
+    parser.add_argument("--std_max", type=float, default=20,
                         help="Per-axis total_std upper bound (pixels outside → NaN)")
-    # parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
-    # parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
-    # parser.add_argument("--excl_cz", type=float, default=0.165, help="Exclusion zone center Z")
-    parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
-    parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
-    parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
+    parser.add_argument("--excl_cx", type=float, default=0.0, help="Exclusion zone center X")
+    parser.add_argument("--excl_cy", type=float, default=0.04, help="Exclusion zone center Y")
+    parser.add_argument("--excl_cz", type=float, default=0.165, help="Exclusion zone center Z")
+    # parser.add_argument("--excl_cx", type=float, default=0.045, help="Exclusion zone center X")
+    # parser.add_argument("--excl_cy", type=float, default=0.057, help="Exclusion zone center Y")
+    # parser.add_argument("--excl_cz", type=float, default=0.16, help="Exclusion zone center Z")
     parser.add_argument("--excl_rx", type=float, default=0.05, help="Exclusion zone radius X")
     parser.add_argument("--excl_ry", type=float, default=0.05, help="Exclusion zone radius Y")
     parser.add_argument("--excl_rz", type=float, default=0.05, help="Exclusion zone radius Z")
-    parser.add_argument("--corr_excl", action="store_true", default=True,
+    parser.add_argument("--corr_excl", action="store_true", default=False,
                         help="Apply exclusion filter to CORRECTED mode as well")
     parser.add_argument("--excl_mode", choices=["and", "or"], default="or",
                         help="Exclusion mode: all axes (and) or any axis (or)")
@@ -602,7 +657,8 @@ if __name__ == "__main__":
                         help="Disable radius sweep, use standard single-excl mode")
     parser.add_argument("--std_excl_min", type=float, default=0.01,
                         help="Only exclude pixels with total_std > this value")
-    parser.add_argument("--alpha_mlp", type=str, default=None,
+    parser.add_argument("--alpha_mlp", type=str, \
+                        default='outputs/alpha_cali/alpha_mlp_fgsm_augmix_l1_lr0.001_raw0_keep1_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05.pt',
                         help="Use trained MLP model instead of CSV lookup table")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
@@ -617,7 +673,7 @@ if __name__ == "__main__":
         sweep_r = args.excl_sweep_r
     else:
         sweep_r = DEFAULT_SWEEP
-
+    print(args.corr_excl)
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
              args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min,
              args.alpha_mlp)

@@ -11,7 +11,7 @@ from run import load_config as load_train_config, build_model
 from utils_datasets.speedplus_utils_main.utils import (
     PyTorchSatellitePoseEstimationDataset, points as body_points)
 from utils_datasets.speedplus_utils_main.space_aug import SpaceAugTransform
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, random_split
 
 
 DATASET_DIR = os.path.join(PROJECT_ROOT, 'datasets', 'speedplus', 'speedplus')
@@ -65,7 +65,28 @@ def build_dataloader(uuid: str, split: str, max_samples=None, batch_size=1):
         transform=SpaceAugTransform('none', styleaug_p=0))
     if max_samples is not None and max_samples < len(ds):
         ds = Subset(ds, range(max_samples))
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4)
+
+
+def build_mlp_dataloader(uuid: str, aug_type: str, max_samples=None, mlp_batch=16):
+    """Build train/val DataLoaders with SpaceAugTransform (like run.py build_dataset)."""
+    ds = PyTorchSatellitePoseEstimationDataset(
+        split='validation', speed_root=DATASET_DIR, points=body_points,
+        transform=SpaceAugTransform(aug_type, styleaug_p=0, styleaug_alpha=0))
+    if max_samples is not None and max_samples < len(ds):
+        ds = Subset(ds, range(max_samples))
+    n_total = len(ds)
+    n_train = int(0.8 * n_total)
+    n_val = n_total - n_train
+    train_ds, val_ds = random_split(ds, [n_train, n_val],
+                                    generator=torch.Generator().manual_seed(42))
+    train_loader = DataLoader(train_ds, batch_size=mlp_batch, shuffle=True,
+                              num_workers=8, pin_memory=True, drop_last=False,
+                              persistent_workers=True)
+    val_loader = DataLoader(val_ds, batch_size=mlp_batch, shuffle=False,
+                            num_workers=8, pin_memory=True, drop_last=False,
+                            persistent_workers=True)
+    return train_loader, val_loader, n_total, n_train
 
 
 def extract_full(model, bc, sample_batch, device, model_type) -> dict:
