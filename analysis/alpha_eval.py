@@ -160,7 +160,7 @@ def run_pnp(outputs_raw: dict, gtbbox: torch.Tensor, qgt: torch.Tensor, rgt: tor
 
 def run_pnp_unc(coords_tensor: torch.Tensor, outputs_raw: dict, gtbbox: torch.Tensor,
                 qgt: torch.Tensor, rgt: torch.Tensor) -> tuple:
-    """Uncertainty-weighted PnP (RANSAC + LM) on given coords. Returns (angle_deg, dist_abs, std)."""
+    """Uncertainty-weighted PnP (RANSAC + LM) on given coords. Returns (angle_deg, dist_abs, ok)."""
     activate = torch.nn.Sigmoid()
     c = coords_tensor.clone().detach()
     mask_bool = (activate(outputs_raw["mask"]) > 0.5).expand_as(c).cpu()
@@ -180,14 +180,14 @@ def run_pnp_unc(coords_tensor: torch.Tensor, outputs_raw: dict, gtbbox: torch.Te
 
     gtb = gtbbox.cpu().detach().numpy()
     try:
-        qvecs, tvecs, std = pose_calculate_with_unc(Camera.K, coormap_np, unc_np, gtb)
+        qvecs, tvecs, _ = pose_calculate_with_unc(Camera.K, coormap_np, unc_np, gtb)
     except Exception:
-        return float("nan"), float("nan"), None
+        return float("nan"), float("nan"), False
 
     qg = qgt.squeeze().cpu()
     rg = rgt.squeeze().cpu()
     err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(qvecs, tvecs, qg, rg, True)
-    return float(err_ori_deg), float(err_r_abs), std
+    return float(err_ori_deg), float(err_r_abs), True
 
 
 # ── main eval ────────────────────────────────────────────────────────────────
@@ -250,8 +250,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         base_angles, base_dists = [], []
         excl_angles, excl_dists = [], []   # DER + exclusion filter
         corr_angles, corr_dists = [], []    # alpha corrected
-        unc_angles, unc_dists = [], []      # raw + uncertainty-weighted PnP
-        uncc_angles, uncc_dists = [], []    # corrected + uncertainty-weighted PnP
+        unc_base_angles, unc_base_dists = [], []   # BASELINE + uncertainty-weighted PnP
+        unc_excl_angles, unc_excl_dists = [], []   # EXCLUDED + uncertainty-weighted PnP
+        unc_corr_angles, unc_corr_dists = [], []   # CORRECTED + uncertainty-weighted PnP
         per_image = []
         # per-pixel pred vs std collection (sampled)
         std_preds, std_ts, std_epi, std_alea = [], [], [], []
@@ -273,11 +274,12 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             # ── baseline: raw DER, no filtering ──
             angle_base, dist_base, ok_base = run_pnp(outputs_raw, gtbbox, qgt, rgt)
 
-            # ── UNC: raw coords + uncertainty-weighted PnP ──
-            angle_unc, dist_unc, std_unc = run_pnp_unc(outputs_raw["c"], outputs_raw, gtbbox, qgt, rgt)
+            # ── BASELINE + uncertainty-weighted PnP ──
+            angle_base_unc, dist_base_unc, ok_base_unc = run_pnp_unc(outputs_raw["c"], outputs_raw, gtbbox, qgt, rgt)
 
             # ── exclusion filter (shared for EXCLUDED + optional CORRECTED) ──
             angle_excl = dist_excl = ok_excl = None
+            angle_excl_unc = dist_excl_unc = ok_excl_unc = None
             if has_excl:
                 excl_c = outputs_raw["c"].clone()
                 c_np = excl_c.squeeze(0).cpu().numpy()
@@ -309,6 +311,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 outputs_excl["c"] = excl_c
                 angle_excl, dist_excl, ok_excl = run_pnp(outputs_excl, gtbbox, qgt, rgt)
 
+                # ── EXCLUDED + uncertainty-weighted PnP ──
+                angle_excl_unc, dist_excl_unc, ok_excl_unc = run_pnp_unc(excl_c, outputs_raw, gtbbox, qgt, rgt)
+
             # ── corrected: optional exclusion → alpha correction ──
             if has_excl and corr_excl:
                 c_for_alpha = torch.from_numpy(c_np).unsqueeze(0).to(device).to(outputs_raw["c"].dtype)
@@ -326,8 +331,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             outputs_corr["c"] = coords_corr
             angle_corr, dist_corr, ok_corr = run_pnp(outputs_corr, gtbbox, qgt, rgt)
 
-            # ── UNC_CORR: corrected coords + uncertainty-weighted PnP ──
-            angle_uncc, dist_uncc, std_uncc = run_pnp_unc(coords_corr, outputs_raw, gtbbox, qgt, rgt)
+            # ── CORRECTED + uncertainty-weighted PnP ──
+            angle_corr_unc, dist_corr_unc, ok_corr_unc = run_pnp_unc(coords_corr, outputs_raw, gtbbox, qgt, rgt)
 
             if ok_base:
                 base_angles.append(angle_base)
@@ -338,12 +343,15 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             if ok_corr:
                 corr_angles.append(angle_corr)
                 corr_dists.append(dist_corr)
-            if std_unc is not None and np.isfinite(angle_unc):
-                unc_angles.append(angle_unc)
-                unc_dists.append(dist_unc)
-            if std_uncc is not None and np.isfinite(angle_uncc):
-                uncc_angles.append(angle_uncc)
-                uncc_dists.append(dist_uncc)
+            if ok_base_unc:
+                unc_base_angles.append(angle_base_unc)
+                unc_base_dists.append(dist_base_unc)
+            if has_excl and ok_excl_unc:
+                unc_excl_angles.append(angle_excl_unc)
+                unc_excl_dists.append(dist_excl_unc)
+            if ok_corr_unc:
+                unc_corr_angles.append(angle_corr_unc)
+                unc_corr_dists.append(dist_corr_unc)
 
             # sample pixels for pred vs std plot (max ~5000 per image)
             c_np = outputs_raw["c"].squeeze(0).cpu().numpy()  # (3, H, W)
@@ -371,10 +379,9 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 "angle_base": angle_base, "dist_base": dist_base,
                 "angle_excl": angle_excl, "dist_excl": dist_excl,
                 "angle_corr": angle_corr, "dist_corr": dist_corr,
-                "angle_unc": angle_unc, "dist_unc": dist_unc,
-                "std_unc": std_unc.tolist() if std_unc is not None else None,
-                "angle_uncc": angle_uncc, "dist_uncc": dist_uncc,
-                "std_uncc": std_uncc.tolist() if std_uncc is not None else None,
+                "angle_base_unc": angle_base_unc, "dist_base_unc": dist_base_unc,
+                "angle_excl_unc": angle_excl_unc, "dist_excl_unc": dist_excl_unc,
+                "angle_corr_unc": angle_corr_unc, "dist_corr_unc": dist_corr_unc,
             })
 
         # aggregate
@@ -391,18 +398,20 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             "std_range": {"min": std_min, "max": std_max},
             "BASELINE":  {"angle": stats(base_angles), "dist": stats(base_dists)},
             "CORRECTED": {"angle": stats(corr_angles), "dist": stats(corr_dists)},
-            "UNC":       {"angle": stats(unc_angles), "dist": stats(unc_dists)},
-            "UNC_CORR":  {"angle": stats(uncc_angles), "dist": stats(uncc_dists)},
+            "BASELINE_with_unc":  {"angle": stats(unc_base_angles), "dist": stats(unc_base_dists)},
+            "CORRECTED_with_unc": {"angle": stats(unc_corr_angles), "dist": stats(unc_corr_dists)},
             "per_image": per_image,
         }
         if has_excl:
             result["EXCLUDED"] = {"angle": stats(excl_angles), "dist": stats(excl_dists)}
+            result["EXCLUDED_with_unc"] = {"angle": stats(unc_excl_angles), "dist": stats(unc_excl_dists)}
 
         base = os.path.join(out_dir, split)
         with open(f"{base}.json", "w") as f:
             json.dump(result, f, indent=2)
         csv_fields = ["angle_base", "dist_base", "angle_excl", "dist_excl", "angle_corr", "dist_corr",
-                      "angle_unc", "dist_unc", "angle_uncc", "dist_uncc"]
+                      "angle_base_unc", "dist_base_unc", "angle_excl_unc", "dist_excl_unc",
+                      "angle_corr_unc", "dist_corr_unc"]
         with open(f"{base}.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
             w.writeheader()
@@ -413,8 +422,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         if has_excl:
             print(f"  EXCLUDED:   angle={result['EXCLUDED']['angle']['mean']:.2f}° ± {result['EXCLUDED']['angle']['std']:.2f}  dist={result['EXCLUDED']['dist']['mean']:.4f}  n={result['EXCLUDED']['angle']['n']}")
         print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
-        print(f"  UNC:        angle={result['UNC']['angle']['mean']:.2f}° ± {result['UNC']['angle']['std']:.2f}  dist={result['UNC']['dist']['mean']:.4f}  n={result['UNC']['angle']['n']}")
-        print(f"  UNC_CORR:   angle={result['UNC_CORR']['angle']['mean']:.2f}° ± {result['UNC_CORR']['angle']['std']:.2f}  dist={result['UNC_CORR']['dist']['mean']:.4f}  n={result['UNC_CORR']['angle']['n']}")
+        print(f"  BASELINE_with_unc:  angle={result['BASELINE_with_unc']['angle']['mean']:.2f}° ± {result['BASELINE_with_unc']['angle']['std']:.2f}  dist={result['BASELINE_with_unc']['dist']['mean']:.4f}  n={result['BASELINE_with_unc']['angle']['n']}")
+        if has_excl:
+            print(f"  EXCLUDED_with_unc:  angle={result['EXCLUDED_with_unc']['angle']['mean']:.2f}° ± {result['EXCLUDED_with_unc']['angle']['std']:.2f}  dist={result['EXCLUDED_with_unc']['dist']['mean']:.4f}  n={result['EXCLUDED_with_unc']['angle']['n']}")
+        print(f"  CORRECTED_with_unc: angle={result['CORRECTED_with_unc']['angle']['mean']:.2f}° ± {result['CORRECTED_with_unc']['angle']['std']:.2f}  dist={result['CORRECTED_with_unc']['dist']['mean']:.4f}  n={result['CORRECTED_with_unc']['angle']['n']}")
 
         # pred vs std plot
         if len(std_preds) > 0:

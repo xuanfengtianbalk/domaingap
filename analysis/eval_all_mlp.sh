@@ -27,7 +27,7 @@ OUT_DIR="../outputs/alpha_cali/mlp_eval"
 mkdir -p "$OUT_DIR"
 CSV_PATH="$OUT_DIR/mlp_eval_results.csv"
 
-echo "pt_file,split,raw,keep,loss,lr,std_min,std_max,std_excl_min,corr_excl,baseline_angle_mean,baseline_angle_std,baseline_dist_mean,baseline_n,excluded_angle_mean,excluded_angle_std,excluded_dist_mean,excluded_n,corrected_angle_mean,corrected_angle_std,corrected_dist_mean,corrected_n,unc_angle_mean,unc_angle_std,unc_dist_mean,unc_n,unc_corr_angle_mean,unc_corr_angle_std,unc_corr_dist_mean,unc_corr_n" > "$CSV_PATH"
+echo "pt_file,split,raw,keep,loss,lr,std_min,std_max,std_excl_min,corr_excl,baseline_angle_mean,baseline_angle_std,baseline_dist_mean,baseline_n,excluded_angle_mean,excluded_angle_std,excluded_dist_mean,excluded_n,corrected_angle_mean,corrected_angle_std,corrected_dist_mean,corrected_n,baseline_unc_angle_mean,baseline_unc_angle_std,baseline_unc_dist_mean,baseline_unc_n,excluded_unc_angle_mean,excluded_unc_angle_std,excluded_unc_dist_mean,excluded_unc_n,corrected_unc_angle_mean,corrected_unc_angle_std,corrected_unc_dist_mean,corrected_unc_n" > "$CSV_PATH"
 
 TOTAL=0
 SKIPPED=0
@@ -75,7 +75,7 @@ for LR in "${LRS[@]}"; do
             --std_max "$SMAX" \
             --no_sweep \
             $CORR_FLAG \
-            2>&1 | grep -E "^(===|  BASELINE|  EXCLUDED|  CORRECTED|  UNC|  →|Loaded|Model:|Error|Traceback)" || true
+            2>&1 | grep -E "^(===|  BASELINE|  EXCLUDED|  CORRECTED|  →|Loaded|Model:|Error|Traceback)" || true
 
         # Parse output JSON
         JSON_PATH="../outputs/alpha_eval/${SPLIT}.json"
@@ -87,16 +87,18 @@ with open('$JSON_PATH') as f:
 b = d['BASELINE']
 c = d['CORRECTED']
 e = d.get('EXCLUDED', {})
-u = d.get('UNC', {})
-uc = d.get('UNC_CORR', {})
+bu = d.get('BASELINE_with_unc', {})
+eu = d.get('EXCLUDED_with_unc', {})
+cu = d.get('CORRECTED_with_unc', {})
 row = [
     '${FNAME}', '${SPLIT}', '${RAW}', '${KEEP}', '${LOSS}', '${LR}',
     '${SMIN}', '${SMAX}', '${STD_EXCL}', '${CORR}',
     b['angle']['mean'], b['angle']['std'], b['dist']['mean'], b['angle']['n'],
     e.get('angle',{}).get('mean',''), e.get('angle',{}).get('std',''), e.get('dist',{}).get('mean',''), e.get('angle',{}).get('n',''),
     c['angle']['mean'], c['angle']['std'], c['dist']['mean'], c['angle']['n'],
-    u.get('angle',{}).get('mean',''), u.get('angle',{}).get('std',''), u.get('dist',{}).get('mean',''), u.get('angle',{}).get('n',''),
-    uc.get('angle',{}).get('mean',''), uc.get('angle',{}).get('std',''), uc.get('dist',{}).get('mean',''), uc.get('angle',{}).get('n',''),
+    bu.get('angle',{}).get('mean',''), bu.get('angle',{}).get('std',''), bu.get('dist',{}).get('mean',''), bu.get('angle',{}).get('n',''),
+    eu.get('angle',{}).get('mean',''), eu.get('angle',{}).get('std',''), eu.get('dist',{}).get('mean',''), eu.get('angle',{}).get('n',''),
+    cu.get('angle',{}).get('mean',''), cu.get('angle',{}).get('std',''), cu.get('dist',{}).get('mean',''), cu.get('angle',{}).get('n',''),
 ]
 print(','.join(str(x) for x in row))
 " 2>/dev/null)
