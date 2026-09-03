@@ -106,6 +106,29 @@ def build_optimizer(config, model):
     return optimizer
 
 
+EMBED_DIM_MAP = {
+    'dinov3_vits16': 384,
+    'dinov3_vitb14': 768,
+    'dinov3_vitl16': 1024,
+    'dinov3_vitg14': 1536,
+}
+
+
+def get_backbone_embed_dim(model, backbone_name=None):
+    """Resolve encoder feature channel dim (for Stable Learning feature net)."""
+    if backbone_name in EMBED_DIM_MAP:
+        return EMBED_DIM_MAP[backbone_name]
+    m = model
+    while m is not None:
+        enc = getattr(m, 'encoder', None)
+        if enc is not None:
+            bb = getattr(enc, 'backbone', None)
+            if bb is not None and hasattr(bb, 'embed_dim'):
+                return bb.embed_dim
+        m = getattr(m, 'module', None)
+    return 384
+
+
 def get_warmup_scheduler(optimizer: Optimizer, warmup_steps: int = 1000, warmup_start_factor: float = 0.0):
     """
     返回一个 LambdaLR 调度器，在前 warmup_steps 步内将学习率从
@@ -362,7 +385,8 @@ def parse_args():
                     help='GPU device IDs to use (e.g., --gpu 0 1 2)')
     parser.add_argument('--model_type', nargs='+',
                         help='List of model types: coordinates, softass, keypoints_gs, keypoints_set')
-    parser.add_argument('--train_script', type=str, default='train', choices=['train', 'train_consistency'],
+    parser.add_argument('--train_script', type=str, default='train',
+                        choices=['train', 'train_consistency', 'train_stable', 'train_l2sdg'],
                         help='Which training script to use')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
@@ -516,6 +540,35 @@ def main():
         optimizer = build_optimizer(config, model)
         scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
 
+        # ── Stable Learning components ──
+        stable_state = None
+        rff_layer = None
+        feature_net = None
+        if args.train_script == 'train_stable':
+            from Hyperpose_net.losses.stable_learning import FeatureNet, RFFLayer, StableNetState
+            sl_cfg = config.get('STABLE_LEARNING', {})
+            n_z = int(sl_cfg.get('n_z', 512))
+            rff_dim = int(sl_cfg.get('rff_dim', 1000))
+            in_dim = get_backbone_embed_dim(model, config['MODEL']['BACKBONE_NAME'])
+            feature_net = FeatureNet(in_dim, n_z).to(device)
+            rff_layer = RFFLayer(n_z, rff_dim, float(sl_cfg.get('rff_sigma', 1.0))).to(device)
+            stable_state = StableNetState(n_z, rff_dim, float(sl_cfg.get('beta', 0.9)), device=device)
+            optimizer.add_param_group({'params': feature_net.parameters()})
+            if is_master:
+                print(f"[Stable Learning] in_dim={in_dim} n_z={n_z} rff_dim={rff_dim} enable={sl_cfg.get('enable', False)}")
+
+        # ── L2SDG components ──
+        wae = None
+        wae_optimizer = None
+        if args.train_script == 'train_l2sdg':
+            from Hyperpose_net.losses.l2sdg import WAE
+            l2_cfg = config.get('L2SDG', {})
+            wae = WAE(latent_dim=int(l2_cfg.get('latent_dim', 128)),
+                      epsilon=float(l2_cfg.get('epsilon', 8.0))).to(device)
+            wae_optimizer = torch.optim.AdamW(wae.parameters(), lr=float(l2_cfg.get('wae_lr', 1e-3)))
+            if is_master:
+                print(f"[L2SDG] latent={l2_cfg.get('latent_dim', 128)} epsilon={l2_cfg.get('epsilon', 8.0)} enable={l2_cfg.get('enable', False)}")
+
         epochs = config['TRAIN']['MAX_EPOCH']
         for epoch in range(epochs):
             if train_sampler is not None:
@@ -523,6 +576,24 @@ def main():
             if args.train_script == 'train_consistency':
                 from train_consistency import train_one_epoch_randconv
                 train_loss = train_one_epoch_randconv(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, randconv_layers=randconv_layers, n_aug_branches=n_aug_branches, bc=bc, consistency_weight=config['TRAIN'].get('RAND_CONV_CONSISTENCY', 0.1), n_branches=n_branches)
+            elif args.train_script == 'train_stable':
+                from train_stable import train_one_epoch_stable
+                sl_cfg = config.get('STABLE_LEARNING', {})
+                train_loss = train_one_epoch_stable(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device,
+                                                    rff_layer=rff_layer, feature_net=feature_net, state=stable_state,
+                                                    weight_steps=int(sl_cfg.get('weight_steps', 3)),
+                                                    weight_lr=float(sl_cfg.get('weight_lr', 0.1)),
+                                                    enable=bool(sl_cfg.get('enable', False)))
+            elif args.train_script == 'train_l2sdg':
+                from train_l2sdg import train_one_epoch_l2sdg
+                l2_cfg = config.get('L2SDG', {})
+                train_loss = train_one_epoch_l2sdg(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device,
+                                                   wae=wae, wae_optimizer=wae_optimizer,
+                                                   beta=float(l2_cfg.get('beta', 0.5)),
+                                                   lambda_norm=float(l2_cfg.get('lambda_norm', 1e-4)),
+                                                   lambda_mmd=float(l2_cfg.get('lambda_mmd', 1e-3)),
+                                                   perturb_steps=int(l2_cfg.get('perturb_steps', 1)),
+                                                   enable=bool(l2_cfg.get('enable', False)))
             else:
                 train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
             if is_master:

@@ -27,6 +27,25 @@ EVIDENTIAL_CLS:
   lamb: 0.001
   threshold: 0.0
 
+STABLE_LEARNING:
+  enable: false             # sample reweighting on/off (train_script=train_stable)
+  n_z: 512                  # feature net output dim
+  rff_dim: 1000             # random fourier feature dim
+  rff_sigma: 1.0            # RFF weight std
+  weight_steps: 3           # inner SGD steps for sample weights
+  weight_lr: 0.1            # inner SGD lr for sample weights
+  beta: 0.9                 # global balancing EMA factor
+
+L2SDG:
+  enable: false             # WAE adversarial augmentation on/off (train_script=train_l2sdg)
+  latent_dim: 128           # WAE latent dim
+  epsilon: 8.0              # pixel-space perturbation bound (/255)
+  beta: 0.5                 # clean-image task loss weight in meta objective
+  lambda_norm: 1e-4         # perturbation magnitude penalty
+  lambda_mmd: 1e-3          # MMD (WAE prior) penalty
+  perturb_steps: 1          # inner adversarial steps
+  wae_lr: 1e-3              # WAE optimizer lr
+
 TRAIN:
   LR: 5e-4
   OPTIM: 'AdamW'

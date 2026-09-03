@@ -243,7 +243,7 @@ class Depther(torch.nn.Module):
         else:
             self.autocast_ctx = partial(torch.autocast, device_type="cpu", enabled=True)
 
-    def forward(self, x):
+    def forward(self, x, return_features: bool = False):
         with self.autocast_ctx():
             features = self.encoder(x)
             # 并行通过所有 decoder
@@ -264,7 +264,9 @@ class Depther(torch.nn.Module):
                     final_outs[key] = self.heads[key](feat)
                     if key == "coordinates" or key == "coordinates_gs":
                         final_outs["mask"] = self.heads["mask"](feat)
-            return final_outs
+        if return_features:
+            return final_outs, features
+        return final_outs
 
 
 def build_depther(
