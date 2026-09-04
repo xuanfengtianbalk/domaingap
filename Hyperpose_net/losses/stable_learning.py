@@ -66,14 +66,21 @@ class StableNetState:
         self.B_u = torch.zeros(1, rff_dim, device=device)
 
     def loss(self, w, z, u):
-        """Decorrelation loss given sample weights w [B], features z [B,n_z],
-        rff u [B,m]. Uses global buffers B_z/B_u for centering."""
+        """Independence loss (StableNet Eq.12): weighted cross-covariance
+        centered with global means B_z/B_u. Linear in w.
+
+        cov[j,k] = E_B[w·z_j·u_k] − B_z,j·E_B[w·u_k] − B_u,k·E_B[w·z_j] + B_z,j·B_u,k
+        """
         w = w.clamp(min=0.0)
         w = w / (w.mean() + 1e-8)  # normalize mean 1
         n = z.shape[0]
-        z_w = (z * w[:, None] - self.B_z)   # [B, n_z]
-        u_w = (u * w[:, None] - self.B_u)   # [B, m]
-        cov = (z_w.T @ u_w) / n             # [n_z, m]
+        z_w = (w[:, None] * z).mean(0)          # E_B[w·z],   [n_z]
+        u_w = (w[:, None] * u).mean(0)          # E_B[w·u],   [m]
+        cross = (w[:, None] * z).T @ u / n      # E_B[w·z·u], [n_z, m]
+        cov = (cross
+               - self.B_z.T @ u_w[None, :]      # − f̄ ⊗ ū_w
+               - z_w[:, None] @ self.B_u        # − z_w ⊗ ū
+               + self.B_z.T @ self.B_u)         # + f̄ ⊗ ū
         return (cov ** 2).sum()
 
     def update_global_B(self, w, z, u):
