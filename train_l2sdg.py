@@ -56,12 +56,7 @@ def train_one_epoch_l2sdg(model, dataloader, model_type, criterion, optimizer,
         B = samples.shape[0]
         inputs_detached = inputs.detach()
 
-        # ── 1. clean task loss ──
-        with torch.amp.autocast('cuda'):
-            outputs_orig = model(inputs)
-            L_orig = criterion(outputs_orig, imageshapes_t, target_dict)
-
-        # ── 2. inner: adversarial WAE update (maximize task loss on perturbed) ──
+        # ── 1. inner: adversarial WAE update (maximize task loss on perturbed) ──
         for _ in range(perturb_steps):
             wae_optimizer.zero_grad()
             x_pert = wae(inputs_detached)
@@ -74,21 +69,33 @@ def train_one_epoch_l2sdg(model, dataloader, model_type, criterion, optimizer,
                        + lambda_mmd * mmd_rbf(z, z_prior)
             wae_loss.backward()
             wae_optimizer.step()
-        model.zero_grad()
+            del outputs_pert, L_adv, wae_loss, x_pert
+        # adversarial backward polluted model grads — clear them
+        optimizer.zero_grad()
 
-        # ── 3. outer: meta update on updated-WAE perturbation + clean ──
+        # ── 2. outer: meta update on updated-WAE perturbation (sequential
+        #    backward: only ONE model graph alive at a time) ──
         with torch.no_grad():
             x_pert2 = wae(inputs_detached)
         with torch.amp.autocast('cuda'):
             outputs_pert2 = model(x_pert2)
             L_meta = criterion(outputs_pert2, imageshapes_t, target_dict)
-        total = L_meta + beta * L_orig
-        optimizer.zero_grad()
-        total.backward()
+        total_val = L_meta.item()
+        L_meta.backward()
+        del outputs_pert2, L_meta, x_pert2
+
+        # ── 3. clean task loss (beta-weighted) ──
+        with torch.amp.autocast('cuda'):
+            outputs_orig = model(inputs)
+            L_orig = criterion(outputs_orig, imageshapes_t, target_dict)
+        total_val = total_val + beta * L_orig.item()
+        (beta * L_orig).backward()
+        del outputs_orig, L_orig
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
 
-        losses_epoch.append(total.detach().cpu())
-        pbar.set_postfix(loss=f"{total.item():.4f}", lr=optimizer.param_groups[0]['lr'])
+        losses_epoch.append(torch.tensor(total_val))
+        pbar.set_postfix(loss=f"{total_val:.4f}", lr=optimizer.param_groups[0]['lr'])
     return torch.tensor(losses_epoch).mean()
