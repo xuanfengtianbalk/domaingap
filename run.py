@@ -542,20 +542,20 @@ def main():
 
         # ── Stable Learning components ──
         stable_state = None
-        rff_layer = None
-        feature_net = None
+        rff = None
         if args.train_script == 'train_stable':
-            from Hyperpose_net.losses.stable_learning import FeatureNet, RFFLayer, StableNetState
+            from Hyperpose_net.losses.stable_learning import RFFTransform, StableNetState
             sl_cfg = config.get('STABLE_LEARNING', {})
-            n_z = int(sl_cfg.get('n_z', 512))
-            rff_dim = int(sl_cfg.get('rff_dim', 1000))
             in_dim = get_backbone_embed_dim(model, config['MODEL']['BACKBONE_NAME'])
-            feature_net = FeatureNet(in_dim, n_z).to(device)
-            rff_layer = RFFLayer(n_z, rff_dim, float(sl_cfg.get('rff_sigma', 1.0))).to(device)
-            stable_state = StableNetState(n_z, rff_dim, float(sl_cfg.get('beta', 0.9)), device=device)
-            optimizer.add_param_group({'params': feature_net.parameters()})
+            num_f = int(sl_cfg.get('num_f', 1))
+            n_feature = int(sl_cfg.get('n_feature', 0)) or int(config['TRAIN']['BATCH_SIZE'])
+            rff = RFFTransform(in_dim, num_f,
+                               float(sl_cfg.get('rff_sigma', 1.0))).to(device)
+            stable_state = StableNetState(n_feature, in_dim,
+                                          float(sl_cfg.get('presave_ratio', 0.9)),
+                                          device=device)
             if is_master:
-                print(f"[Stable Learning] in_dim={in_dim} n_z={n_z} rff_dim={rff_dim} enable={sl_cfg.get('enable', False)}")
+                print(f"[Stable Learning] feature_dim={in_dim} num_f={num_f} n_feature={n_feature} enable={sl_cfg.get('enable', False)}")
 
         # ── L2SDG components ──
         wae = None
@@ -580,9 +580,17 @@ def main():
                 from train_stable import train_one_epoch_stable
                 sl_cfg = config.get('STABLE_LEARNING', {})
                 train_loss = train_one_epoch_stable(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device,
-                                                    rff_layer=rff_layer, feature_net=feature_net, state=stable_state,
-                                                    weight_steps=int(sl_cfg.get('weight_steps', 3)),
-                                                    weight_lr=float(sl_cfg.get('weight_lr', 0.1)),
+                                                    rff=rff, state=stable_state, epoch=epoch,
+                                                    num_f=int(sl_cfg.get('num_f', 1)),
+                                                    epochb=int(sl_cfg.get('epochb', 20)),
+                                                    lrbl=float(sl_cfg.get('lrbl', 1.0)),
+                                                    lambdap=float(sl_cfg.get('lambdap', 70.0)),
+                                                    decay_pow=float(sl_cfg.get('decay_pow', 2)),
+                                                    epochp=int(sl_cfg.get('epochp', 0)),
+                                                    first_step_cons=float(sl_cfg.get('first_step_cons', 1.0)),
+                                                    lambda_decay_rate=float(sl_cfg.get('lambda_decay_rate', 1)),
+                                                    lambda_decay_epoch=int(sl_cfg.get('lambda_decay_epoch', 5)),
+                                                    min_lambda_times=float(sl_cfg.get('min_lambda_times', 0.01)),
                                                     enable=bool(sl_cfg.get('enable', False)))
             elif args.train_script == 'train_l2sdg':
                 from train_l2sdg import train_one_epoch_l2sdg

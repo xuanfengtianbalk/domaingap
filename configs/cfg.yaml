@@ -29,12 +29,19 @@ EVIDENTIAL_CLS:
 
 STABLE_LEARNING:
   enable: false             # sample reweighting on/off (train_script=train_stable)
-  n_z: 512                  # feature net output dim
-  rff_dim: 1000             # random fourier feature dim
-  rff_sigma: 1.0            # RFF weight std
-  weight_steps: 3           # inner SGD steps for sample weights
-  weight_lr: 0.1            # inner SGD lr for sample weights
-  beta: 0.9                 # global balancing EMA factor
+  num_f: 1                  # number of fourier spaces
+  rff_sigma: 1.0            # RFF W = randn/sigma (smaller sigma = finer frequencies)
+  n_feature: 16             # global table size (pre-saved features), should equal TRAIN.BATCH_SIZE
+  epochb: 20                # inner balancing iterations per batch
+  lrbl: 1.0                 # sample weight learning rate (SGD momentum 0.9)
+  lambdap: 70.0             # divisor of decorrelation loss (annealed)
+  decay_pow: 2              # weight penalty exponent: sum softmax(w)^decay_pow
+  presave_ratio: 0.9        # global table EMA: 0.9*old + 0.1*new
+  epochp: 0                 # pretrain epochs with uniform weights
+  lambda_decay_rate: 1      # lambdap decay rate per lambda_decay_epoch
+  lambda_decay_epoch: 5
+  min_lambda_times: 0.01
+  first_step_cons: 1        # constraint factor at first epoch
 
 L2SDG:
   enable: false             # WAE adversarial augmentation on/off (train_script=train_l2sdg)

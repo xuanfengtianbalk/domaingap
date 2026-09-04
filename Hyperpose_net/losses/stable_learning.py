@@ -1,92 +1,144 @@
-"""Stable Learning (StableNet) components.
+"""Stable Learning (StableNet) components — aligned with the official repo
+(https://github.com/xxgege/StableNet, CVPR 2021).
 
-Implements sample reweighting via Random Fourier Features (RFF) with
-global balancing, following "StableNet: Stable Learning via Sample
-Reweighting" (Zhang et al., ICML 2021).
+Ports:
+  loss_reweighting.py          → RFFTransform / weighted_cov / lossb
+  training/reweighting.py      → weight_learner
+  models/resnet_with_table.py  → StableNetState (pre_features / pre_weight1 table)
 
-Components:
-  - FeatureNet:   small MLP projecting backbone features to low-dim z
-  - RFFLayer:     fixed random Fourier features u = sqrt(2/m) * cos(z W + b)
-  - StableNetState: global balancing buffers B_z / B_u + decorrelation loss
+Core idea: learn per-sample weights (softmax simplex) that decorrelate
+RFF-transformed features (feature-feature off-diagonal covariance), using a
+global table of pre-saved features/weights (EMA, presave_ratio).
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-class FeatureNet(nn.Module):
-    """Project backbone features z0 to low-dim z (trained jointly with task)."""
+class RFFTransform(nn.Module):
+    """Official random_fourier_features_gpu.
 
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(out_dim, out_dim),
-        )
-
-    def forward(self, z0):
-        return self.net(z0)
-
-
-class RFFLayer(nn.Module):
-    """Random Fourier Features with fixed random weights.
-
-    u(z) = sqrt(2/m) * cos(z @ W + b),  W ~ N(0, sigma^2), b ~ U(0, 2*pi)
+    W ~ randn(num_f, 1) / sigma   (one scalar per fourier space)
+    b ~ U(0, 2*pi)  shape [d, num_f]
+    mid = x @ W.t() + b  → [n, d, num_f]
+    mid normalized to [0, pi/2] along the feature dim d
+    Z = sqrt(2/num_f) * (cos(mid) + sin(mid))   (sum=True in official)
     """
 
-    def __init__(self, in_dim: int, rff_dim: int, sigma: float = 1.0):
+    def __init__(self, feature_dim: int, num_f: int = 1, sigma: float = 1.0):
         super().__init__()
+        self.num_f = num_f
+        self.feature_dim = feature_dim
         self.register_buffer(
-            "W", torch.randn(in_dim, rff_dim) * sigma, persistent=False)
+            "W", torch.randn(num_f, 1) / sigma, persistent=False)
         self.register_buffer(
-            "b", torch.rand(rff_dim) * 2.0 * 3.141592653589793, persistent=False)
-        self.scale = (2.0 / rff_dim) ** 0.5
+            "b", 2.0 * 3.141592653589793 * torch.rand(feature_dim, num_f),
+            persistent=False)
+        self.scale = (2.0 / num_f) ** 0.5
 
-    def forward(self, z):
-        return self.scale * torch.cos(z @ self.W + self.b)
+    def forward(self, x):
+        """x: [n, d] → [n, d, num_f]"""
+        n, d = x.shape
+        x = x.view(n, d, 1)
+        mid = x @ self.W.t() + self.b.unsqueeze(0)      # [n, d, num_f]
+        mid = mid - mid.min(dim=1, keepdim=True)[0]
+        mid = mid / (mid.max(dim=1, keepdim=True)[0] + 1e-12)
+        mid = mid * (3.141592653589793 / 2.0)
+        return self.scale * (torch.cos(mid) + torch.sin(mid))
+
+
+def weighted_cov(x, sw):
+    """Official cov(): weighted second moment minus outer product of
+    weighted means. x: [n, d], sw: [n] (softmax). Returns [d, d]."""
+    sw = sw.view(-1, 1)
+    cov = (sw * x).t() @ x
+    e = (sw * x).sum(0).view(-1, 1)
+    return cov - e @ e.t()
 
 
 class StableNetState:
-    """Global balancing buffers + decorrelation loss (StableNet).
+    """Global table of pre-saved features and weights (Eq. 11/14).
 
-    B_z, B_u are global weighted-mean buffers updated as
-        B <- (1 - beta) * B + beta * mean(w * f)
-    The independence loss uses global-centered cross-covariance:
-        L = sum_{j,k} cov(z_j, u_k)^2
+    pre_features: [n_feature, d] init zeros
+    pre_weight1:  [n_feature, 1] init ones
+    n_feature should equal the batch size (official default 128 == bs 128).
     """
 
-    def __init__(self, n_z: int, rff_dim: int, beta: float = 0.9, device="cuda:0"):
-        self.n_z = n_z
-        self.rff_dim = rff_dim
-        self.beta = beta
+    def __init__(self, n_feature: int, feature_dim: int,
+                 presave_ratio: float = 0.9, device="cuda:0"):
+        self.n_feature = n_feature
+        self.feature_dim = feature_dim
+        self.presave_ratio = presave_ratio
         self.device = device
-        self.B_z = torch.zeros(1, n_z, device=device)
-        self.B_u = torch.zeros(1, rff_dim, device=device)
+        self.pre_features = torch.zeros(n_feature, feature_dim, device=device)
+        self.pre_weight1 = torch.ones(n_feature, 1, device=device)
+        self._first_batch_count = 0
 
-    def loss(self, w, z, u):
-        """Independence loss (StableNet Eq.12): weighted cross-covariance
-        centered with global means B_z/B_u. Linear in w.
+    def lossb(self, all_feature, sw_all, rff):
+        """Official lossb_expect: per-fourier-space weighted feature-feature
+        covariance, penalizing off-diagonal (inter-dimension) terms."""
+        z = rff(all_feature)                              # [N, d, num_f]
+        loss = torch.zeros((), device=self.device)
+        for i in range(z.size(-1)):
+            cov1 = weighted_cov(z[:, :, i], sw_all)       # [d, d]
+            loss = loss + (cov1 ** 2).sum() - (cov1 ** 2).trace()
+        return loss
 
-        cov[j,k] = E_B[w·z_j·u_k] − B_z,j·E_B[w·u_k] − B_u,k·E_B[w·z_j] + B_z,j·B_u,k
-        """
-        w = w.clamp(min=0.0)
-        w = w / (w.mean() + 1e-8)  # normalize mean 1
-        n = z.shape[0]
-        z_w = (w[:, None] * z).mean(0)          # E_B[w·z],   [n_z]
-        u_w = (w[:, None] * u).mean(0)          # E_B[w·u],   [m]
-        cross = (w[:, None] * z).T @ u / n      # E_B[w·z·u], [n_z, m]
-        cov = (cross
-               - self.B_z.T @ u_w[None, :]      # − f̄ ⊗ ū_w
-               - z_w[:, None] @ self.B_u        # − z_w ⊗ ū
-               + self.B_z.T @ self.B_u)         # + f̄ ⊗ ū
-        return (cov ** 2).sum()
+    def lossp(self, sw, decay_pow):
+        """Official lossp: sum of softmax(weight)^decay_pow."""
+        return sw.pow(decay_pow).sum()
 
-    def update_global_B(self, w, z, u):
-        """Update global buffers with final (detached) weights."""
-        w = w.clamp(min=0.0)
-        w = w / (w.mean() + 1e-8)
+    def update(self, cfeatures, weight_final, global_epoch, batch_idx):
+        """Eq. 14: first 10 iterations of epoch 0 → running average;
+        otherwise EMA blend with presave_ratio (0.9 old, 0.1 new)."""
         with torch.no_grad():
-            self.B_z = (1 - self.beta) * self.B_z + self.beta * (w[:, None] * z).mean(0, keepdim=True)
-            self.B_u = (1 - self.beta) * self.B_u + self.beta * (w[:, None] * u).mean(0, keepdim=True)
+            if global_epoch == 0 and batch_idx < 10:
+                self.pre_features = (self.pre_features * batch_idx + cfeatures) / (batch_idx + 1)
+                self.pre_weight1 = (self.pre_weight1 * batch_idx + weight_final) / (batch_idx + 1)
+            elif cfeatures.shape[0] < self.pre_features.shape[0]:
+                B = cfeatures.shape[0]
+                self.pre_features[:B] = (self.pre_features[:B] * self.presave_ratio
+                                         + cfeatures * (1 - self.presave_ratio))
+                self.pre_weight1[:B] = (self.pre_weight1[:B] * self.presave_ratio
+                                        + weight_final * (1 - self.presave_ratio))
+            else:
+                self.pre_features = (self.pre_features * self.presave_ratio
+                                     + cfeatures * (1 - self.presave_ratio))
+                self.pre_weight1 = (self.pre_weight1 * self.presave_ratio
+                                    + weight_final * (1 - self.presave_ratio))
+
+
+def weight_learner(cfeatures, state, rff, num_f, epochb, lrbl, lambdap, decay_pow,
+                   global_epoch, batch_idx, first_step_cons,
+                   lambda_decay_rate, lambda_decay_epoch, min_lambda_times):
+    """Official weight_learner (training/reweighting.py).
+
+    Returns (softmax(weight).detach(), state).
+    """
+    B = cfeatures.shape[0]
+    all_feature = torch.cat([cfeatures, state.pre_features.detach()], dim=0)  # Eq.11
+
+    weight = torch.ones(B, 1, device=state.device, requires_grad=True)
+    momentum_buf = None
+    for _ in range(epochb):
+        all_weight = torch.cat([weight, state.pre_weight1.detach()], dim=0)
+        sw_all = torch.softmax(all_weight, dim=0)
+        sw_local = torch.softmax(weight, dim=0)
+
+        lossb = state.lossb(all_feature, sw_all, rff)
+        lossp = state.lossp(sw_local, decay_pow)
+        lambdap_eff = lambdap * max(
+            lambda_decay_rate ** (global_epoch // lambda_decay_epoch),
+            min_lambda_times)
+        lossg = lossb / lambdap_eff + lossp
+        if global_epoch == 0:
+            lossg = lossg * first_step_cons
+
+        grad = torch.autograd.grad(lossg, weight)[0]
+        if momentum_buf is None:
+            momentum_buf = torch.zeros_like(grad)
+        momentum_buf = 0.9 * momentum_buf + grad
+        weight = (weight.detach() - lrbl * momentum_buf).requires_grad_(True)
+
+    softmax_weight = torch.softmax(weight, dim=0).detach()
+    return softmax_weight, state

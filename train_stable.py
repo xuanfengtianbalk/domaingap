@@ -3,11 +3,15 @@ from tqdm import tqdm
 
 
 def train_one_epoch_stable(model, dataloader, model_type, criterion, optimizer,
-                           scheduler, device, rff_layer=None, feature_net=None,
-                           state=None, weight_steps=3, weight_lr=0.1,
-                           enable=True):
-    """StableNet-style training: sample reweighting with RFF decorrelation
-    + global balancing. When enable=False, behaves like plain train_one_epoch."""
+                           scheduler, device, rff=None, state=None, epoch=0,
+                           num_f=1, epochb=20, lrbl=1.0, lambdap=70.0,
+                           decay_pow=2, epochp=0, first_step_cons=1.0,
+                           lambda_decay_rate=1, lambda_decay_epoch=5,
+                           min_lambda_times=0.01, enable=True):
+    """StableNet training aligned with official repo (xxgege/StableNet).
+
+    enable=False → plain training (ablation control).
+    """
     model.train()
     losses_epoch = []
     pbar = tqdm(dataloader, desc="Training(Stable)", ncols=80)
@@ -38,11 +42,11 @@ def train_one_epoch_stable(model, dataloader, model_type, criterion, optimizer,
             target_dict['mask'] = mask_gt
         if 'keypoints_gs' in model_type:
             target_dict['keypoints_gs'] = torch.stack(gt_target)
+        imageshapes_t = torch.stack(imageshapes)
 
         if not enable or state is None:
             with torch.amp.autocast('cuda'):
                 outputs = model(inputs)
-                imageshapes_t = torch.stack(imageshapes)
                 losses = criterion(outputs, imageshapes_t, target_dict)
             optimizer.zero_grad()
             losses.backward()
@@ -56,48 +60,38 @@ def train_one_epoch_stable(model, dataloader, model_type, criterion, optimizer,
         with torch.amp.autocast('cuda'):
             outputs, features = model(inputs, return_features=True)
 
-        # last-layer patch features → GAP → feature net → RFF
-        patch_feats = features[-1][0].float()          # [B, C, h, w]
-        z0 = torch.nn.functional.adaptive_avg_pool2d(patch_feats, 1).flatten(1)
-        z = feature_net(z0)                            # [B, n_z]
-        u = rff_layer(z)                               # [B, m]
-
-        # per-sample task losses (criterion is scalar-mean; slice per sample)
         B = samples.shape[0]
+
+        # raw penultimate features (GAP), detached — no projection
+        cfeatures = torch.nn.functional.adaptive_avg_pool2d(
+            features[-1][0].float(), 1).flatten(1).detach()   # [B, d]
+
+        # per-sample task losses (criterion per-image slices)
         per_loss = []
-        imageshapes_t = torch.stack(imageshapes)
         with torch.amp.autocast('cuda'):
             for i in range(B):
-                out_i = {}
-                for k, v in outputs.items():
-                    if torch.is_tensor(v):
-                        out_i[k] = v[i:i + 1]
-                td_i = {}
-                for k, v in target_dict.items():
-                    if torch.is_tensor(v):
-                        td_i[k] = v[i:i + 1]
+                out_i = {k: v[i:i + 1] for k, v in outputs.items() if torch.is_tensor(v)}
+                td_i = {k: v[i:i + 1] for k, v in target_dict.items() if torch.is_tensor(v)}
                 per_loss.append(criterion(out_i, imageshapes_t[i:i + 1], td_i))
-        per_loss = torch.stack(per_loss).float()   # [B], keep graph for backward
+        per_loss = torch.stack(per_loss).float()              # [B]
 
-        # learn sample weights w (inner SGD, minimize decorrelation)
-        w = torch.ones(B, device=device)
-        for _ in range(weight_steps):
-            w = w.detach().clone()
-            w.requires_grad_(True)
-            L_indep = state.loss(w, z.detach(), u.detach())
-            grad = torch.autograd.grad(L_indep, w)[0]
-            w = (w - weight_lr * grad).detach().clamp(min=0.0)
-            w = w / (w.mean() + 1e-8)
+        # learn sample weights (warmup: raw ones, official behavior)
+        from Hyperpose_net.losses.stable_learning import weight_learner
+        if epoch >= epochp:
+            w, state = weight_learner(cfeatures, state, rff, num_f, epochb, lrbl,
+                                      lambdap, decay_pow, epoch, idx, first_step_cons,
+                                      lambda_decay_rate, lambda_decay_epoch, min_lambda_times)
+        else:
+            w = torch.ones(B, 1, device=device)
 
-        w = w.detach()
-        loss = (w * per_loss).sum() / B
+        loss = (per_loss * w.squeeze(1)).sum()               # no /B (official)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
 
-        state.update_global_B(w, z.detach(), u.detach())
+        state.update(cfeatures, w, epoch, idx)
 
         losses_epoch.append(loss.detach().cpu())
         pbar.set_postfix(loss=f"{loss.item():.4f}", lr=optimizer.param_groups[0]['lr'])
