@@ -394,6 +394,7 @@ def parse_args():
                         help='Workingdir UUID path for evaluate mode')
     parser.add_argument('--padded', action='store_true', default=False,
                         help='Allow bbox to extend beyond image boundaries (pad with black)')
+    parser.add_argument('--seed', type=int, default=42, help='random seed')
     # 使用 parse_known_args 以接受额外参数
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -413,7 +414,7 @@ def main():
     config['MODEL']['MIXSTYLE_P'] = config['TRAIN'].get('MIXSTYLE_P', 0.5)
     config['MODEL']['MIXSTYLE_ALPHA'] = config['TRAIN'].get('MIXSTYLE_ALPHA', 0.1)
     config = update_config_from_args(config, unknown)
-    set_seed(42 + rank)
+    set_seed(args.seed + rank)
 
     if world_size > 1:
         device = torch.device(f'cuda:{local_rank}')
