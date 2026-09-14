@@ -72,6 +72,17 @@ RUNS = [
      True, 3, 30, 1.0, 70.0, "2e-7", ""),
     ("lr_sweep", "L9_lr1e-7", "bc436b9f-19e0-4417-aa3f-ad345c02d884",
      True, 3, 30, 1.0, 70.0, "1e-7", ""),
+    # ── 甜区多 seed + plain 对照（lr=2e-6）──
+    ("seed_verify", "plain_lr2e-6_seed42", "55748478-38a0-43da-89c3-bfe480dbe46e",
+     False, 3, 30, 1.0, 70.0, "2e-6", "plain对照 enable=False"),
+    ("seed_verify", "S42_lr2e-6", "443c397c-0f9e-49bb-a34a-f87a66a29382",
+     True, 3, 30, 1.0, 70.0, "2e-6", "=L5"),
+    ("seed_verify", "S43_lr2e-6", "b60e1c63-c599-40e0-817a-fa771f4cda25",
+     True, 3, 30, 1.0, 70.0, "2e-6", ""),
+    ("seed_verify", "S44_lr2e-6", "02eff09a-c6d3-4456-9483-543c37b2628d",
+     True, 3, 30, 1.0, 70.0, "2e-6", ""),
+    ("seed_verify", "S45_lr2e-6", "ca30883e-54be-4d77-ad51-130150b129b8",
+     True, 3, 30, 1.0, 70.0, "2e-6", ""),
 ]
 
 
