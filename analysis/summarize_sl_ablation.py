@@ -83,6 +83,15 @@ RUNS = [
      True, 3, 30, 1.0, 70.0, "2e-6", ""),
     ("seed_verify", "S45_lr2e-6", "ca30883e-54be-4d77-ad51-130150b129b8",
      True, 3, 30, 1.0, 70.0, "2e-6", ""),
+    # ── decoder 分层特征实验（lr=2e-6）──
+    ("decoder", "D_R1_lam1_s42_10ep", "b7e907b2-fcf8-43af-9840-7b8483f04836",
+     True, 3, 30, 1.0, 1.0, "2e-6", "decoder特征,lambdap=1,w强激活"),
+    ("decoder", "D_R0b_plain_s43_10ep", "c329bf95-53ac-4176-8e08-f2acdd389d2e",
+     False, 3, 30, 1.0, 70.0, "2e-6", "decoder协议plain对照,seed43"),
+    ("decoder", "D_P1_lam1_s42_1ep", "f26ebd0f-a81b-434a-aa0a-67dd433096c3",
+     True, 3, 30, 1.0, 1.0, "2e-6", "1ep诊断,lambdap=1"),
+    ("decoder", "D_P3_lam10_s42_1ep", "31b997fc-b379-452b-9acd-1ec511a23fd6",
+     True, 3, 30, 1.0, 10.0, "2e-6", "1ep诊断,lambdap=10"),
 ]
 
 

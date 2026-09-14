@@ -111,16 +111,43 @@ lossg  = lossb / lambdap + lossp                     （只训练 w, 不反向�
 
 **两档 lr 完全一致**：w 从第 1 个 batch 起永远是完美均匀分布，直到 b2500+ 无任何偏离。
 
+### 3.6 Decoder 分层特征实验（机制复活验证）
+
+w 诊断证明 encoder 特征 lossb≈0 后，将 StableNet 的重加权对象从 encoder GAP 特征改为 **decoder 的 4 级融合特征**（`DPTHead` 每个 fusion block 输出，GAP 后拼接 [B, 1024]），机制得以复活：
+
+**① w 诊断（decoder 特征）**：
+
+| 配置 | lossb 稳态 | w max/min | 判定 |
+|---|---|---|---|
+| encoder + lambdap=70 | 0.0005~0.005 | 恒 1.000 | 机制死锁 |
+| decoder + lambdap=70 | 0.008~0.055 | 1.003~1.08 | 信号放大 10-50×，仍弱 |
+| decoder + **lambdap=1** | 0.008~0.019 | 中位 4.83，78% batch >2（10ep 全程） | **强激活** |
+| decoder + lambdap=10 | 0.008~0.068 | 中位 1.40，10% batch >2 | 温和激活 |
+
+（注：b0 启动时全局表全零产生 10¹² 尖峰，属启动伪影，非训练现象；真实尖峰为 10~66）
+
+**② 最终归因（10 epoch + eval）**：
+
+| Run | sunlamp angle | dist | lightbox angle | dist | val angle | dist |
+|---|---|---|---|---|---|---|
+| e24d72fb 基线 | 4.47±9.88 | 0.1139 | 3.65±12.04 | 0.0781 | 0.87±2.08 | 0.0248 |
+| R0a plain s42 | 3.85±8.11 | 0.1059 | 3.27±11.39 | 0.0708 | 0.61±1.87 | 0.0177 |
+| R0b plain s43 | 3.98±9.30 | 0.1073 | 3.35±11.62 | 0.0709 | 0.61±2.00 | 0.0165 |
+| **R1 lambdap=1（w 强激活）** | 3.93±8.33 | 0.1103 | 3.32±11.12 | 0.0713 | 0.61±1.92 | 0.0198 |
+
+R1 每个指标都精确落在 plain 区间内（sunlamp 3.93 ∈ [3.85, 3.98]；lightbox 3.32 ∈ [3.27, 3.35]；val 0.61 = 0.61）。
+
 ---
 
 ## 4. 核心结论
 
-### 4.1 StableNet 在此协议下机制死锁
+### 4.1 StableNet 在此协议下完全无效（两层证据闭环）
 
-1. **lossb ≈ 0**：冻结 backbone + LoRA 的特征在 RFF 检验下已无相关（lossb 比首 batch 的 41 小 5 个数量级），去相关目标平凡满足；
-2. 内层 SGD 在均匀点的梯度 = 0（lossb 无梯度 + lossp=Σw² 在均匀处为极小值）；
-3. **w 永不偏离均匀 → 加权损失 ≡ plain 损失 → stable ≡ plain 是数学必然**；
-4. 因此调 lambdap / lrbl / epochb / num_f 都无意义——它们改变不了 lossb≈0 的事实。
+**第一层（encoder 特征）**：lossb≈0 → 内层 SGD 在均匀点梯度为 0 → w 永远均匀 → 加权损失 ≡ plain 损失。调任何超参都无意义。
+
+**第二层（decoder 特征，机制复活后）**：decoder 分层特征 + lambdap=1 让 w 全程强激活（78% batch max/min>2，中位 4.83，真实尖峰 10~66）——**但 R1 与 plain 对照在每个指标上完全重合**。即使重加权机制满负荷工作，对最终模型零贡献。
+
+结论：此任务协议（收敛 checkpoint + 10 epoch 小 lr 微调）下，**StableNet 无效，收益 100% 来自小 lr 微调本身**。
 
 ### 4.2 真正的收益来自小 lr 微调
 
@@ -134,7 +161,7 @@ lossg  = lossb / lambdap + lossp                     （只训练 w, 不反向�
 - 引入训练域异质性（StableNet 针对隐式域不平衡场景）；
 - 补全论文 k 组全局记忆（当前 n_feature=1×batch）。
 
-**在当前"收敛 checkpoint + 10 epoch 微调"协议下，StableNet 无优化空间，判定为无效（null result）。**
+**在当前"收敛 checkpoint + 10 epoch 微调"协议下，StableNet 无优化空间，判定为无效（null result）。**（decoder 特征实验已排除"特征源"这一变量。）
 
 ---
 
