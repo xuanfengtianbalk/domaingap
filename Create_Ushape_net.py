@@ -50,5 +50,7 @@ def Create_Ushape_Net(Encode_Type='dinov3',Decode_Type=["keypoints_gs"], output_
         mixstyle = model_config.get('MIXSTYLE', False),
         mixstyle_p = model_config.get('MIXSTYLE_P', 0.5),
         mixstyle_alpha = model_config.get('MIXSTYLE_ALPHA', 0.1),
+        lastvit_context = model_config.get('LASTVIT_CONTEXT', False),
+        lastvit_gamma = model_config.get('LASTVIT_GAMMA', 1.0),
     )
     return depther_model

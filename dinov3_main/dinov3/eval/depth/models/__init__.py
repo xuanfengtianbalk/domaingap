@@ -247,7 +247,19 @@ class Depther(torch.nn.Module):
         with self.autocast_ctx():
             features = self.encoder(x)
             # 并行通过所有 decoder
-            dec_outs = {key: dec(features) for key, dec in self.decoder.items()}
+            dec_outs = {}
+            dec_hier = {}
+            for key, dec in self.decoder.items():
+                if return_features and hasattr(dec, 'forward_features') and hasattr(dec, 'conv_depth'):
+                    fused, hier = dec.forward_features(features, return_hier=True)
+                    if hasattr(dec, 'apply_lastvit'):
+                        fused = dec.apply_lastvit(fused)
+                        if getattr(dec, 'use_lastvit', False):
+                            hier = hier + [fused]
+                    dec_outs[key] = dec.conv_depth(fused)
+                    dec_hier[key] = hier
+                else:
+                    dec_outs[key] = dec(features)
 
             final_outs = {}
             for key, feat in dec_outs.items():
@@ -265,7 +277,7 @@ class Depther(torch.nn.Module):
                     if key == "coordinates" or key == "coordinates_gs":
                         final_outs["mask"] = self.heads["mask"](feat)
         if return_features:
-            return final_outs, features
+            return final_outs, features, dec_hier
         return final_outs
 
 
@@ -292,6 +304,8 @@ def build_depther(
     mixstyle_p: float = 0.5,
     mixstyle_alpha: float = 0.1,
     peft_config: dict | None = None,
+    lastvit_context: bool = False,
+    lastvit_gamma: float = 1.0,
     **kwargs,
 ):
     # 处理 Decode_Type：统一转换为列表，便于统一处理
@@ -331,6 +345,10 @@ def build_depther(
             head_type=head_type,
             **kwargs,
         )
+        if lastvit_context:
+            # parameter-free LaSt-ViT global context injection (Eq. 4-7)
+            decoder_dict[dt].use_lastvit = True
+            decoder_dict[dt].lastvit_gamma = lastvit_gamma
 
 
     depther = Depther(

@@ -17,6 +17,8 @@ MODEL:
     method: none           # none, ssf, lora, ssf+lora
     lora_rank: 4
     vpt_n_prompts: 10
+  LASTVIT_CONTEXT: false   # LaSt-ViT global context injection in decoder (parameter-free)
+  LASTVIT_GAMMA: 1.0       # injection strength: fused' = fused + gamma * g
 
 EVIDENTIAL:
   lamb: 0.001
@@ -42,6 +44,11 @@ STABLE_LEARNING:
   lambda_decay_epoch: 5
   min_lambda_times: 0.01
   first_step_cons: 1        # constraint factor at first epoch
+  pixel_mode: false         # per-pixel coarse-grid weights (output-size w_map)
+  grid_size: 32             # coarse grid per image (grid_size x grid_size cells)
+  decorr_reg: false         # feature decorrelation regularization (lossb backprops to model)
+  decorr_lambda: 100.0      # weight of lossb in total = task + decorr_lambda * lossb
+  lastvit_weight: false     # LaSt-ViT vote (channel-wise top-K) as per-cell loss weights
 
 L2SDG:
   enable: false             # WAE adversarial augmentation on/off (train_script=train_l2sdg)

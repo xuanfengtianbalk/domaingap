@@ -507,7 +507,7 @@ class DPTHead(nn.Module):
         assert self.num_reassemble_blocks == self.num_post_process_channels
         self.conv_depth = UpConvHead(self.channels, self.n_output_channels)
 
-    def forward_features(self, inputs):
+    def forward_features(self, inputs, return_hier: bool = False):
         assert len(inputs) == self.num_reassemble_blocks, (
             f"Expected {self.num_reassemble_blocks} inputs, got {len(inputs)}."
         )
@@ -516,15 +516,40 @@ class DPTHead(nn.Module):
         x = self.reassemble_blocks(x)
         x = [self.convs[i](feature) for i, feature in enumerate(x)]
         out = self.fusion_blocks[0](x[-1])
+        hier = [out] if return_hier else None
 
         for i in range(1, len(self.fusion_blocks)):
             out = self.fusion_blocks[i](out, x[-(i + 1)])
+            if return_hier:
+                hier.append(out)
 
         out = self.project(out)
+        if return_hier:
+            return out, hier
         return out
 
-    def forward(self, inputs):
-        out = self.forward_features(inputs)
+    def apply_lastvit(self, out):
+        """LaSt-ViT: parameter-free global context (channel-wise top-K stable
+        pooling) injected into the fused feature. Attribute-gated."""
+        if getattr(self, 'use_lastvit', False):
+            from Hyperpose_net.losses.lastvit import lastvit_context
+            g = lastvit_context(out, K=getattr(self, 'lastvit_K', None))
+            out = out + self.lastvit_gamma * g.view(out.shape[0], -1, 1, 1)
+        return out
+
+    def forward(self, inputs, return_hier: bool = False):
+        if return_hier:
+            out, hier = self.forward_features(inputs, return_hier=True)
+        else:
+            out = self.forward_features(inputs)
+            hier = None
+
+        out = self.apply_lastvit(out)
+        if hier is not None and getattr(self, 'use_lastvit', False):
+            hier.append(out)    # expose the injected feature to probes
+
+        if return_hier:
+            return self.conv_depth(out), hier
         return self.conv_depth(out)
 
     def predict(self, inputs, rescale_to=(512, 512)):

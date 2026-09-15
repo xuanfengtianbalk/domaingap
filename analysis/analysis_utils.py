@@ -19,11 +19,13 @@ WORKINGDIR = os.path.join(PROJECT_ROOT, 'workingdir')
 CONFIG_PATH = os.path.join(PROJECT_ROOT, 'configs', 'cfg.yaml')
 
 
-def load_model(uuid: str, model_type: str, backbone: str, device: str):
+def load_model(uuid: str, model_type: str, backbone: str, device: str, lastvit_context=None):
     """Load a trained model from workingdir/{uuid}/model_final.pth"""
     config = load_train_config(CONFIG_PATH)
     config['MODEL']['TYPE'] = [model_type]
     config['MODEL']['BACKBONE_NAME'] = backbone
+    if lastvit_context is not None:
+        config['MODEL']['LASTVIT_CONTEXT'] = lastvit_context
 
     # read PEFT config from train_info if present
     pattern = os.path.join(WORKINGDIR, f'{uuid}*', 'train_info.json')
