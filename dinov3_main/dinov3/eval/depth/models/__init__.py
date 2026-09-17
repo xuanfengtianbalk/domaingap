@@ -252,10 +252,10 @@ class Depther(torch.nn.Module):
             for key, dec in self.decoder.items():
                 if return_features and hasattr(dec, 'forward_features') and hasattr(dec, 'conv_depth'):
                     fused, hier = dec.forward_features(features, return_hier=True)
-                    if hasattr(dec, 'apply_lastvit'):
+                    if (hasattr(dec, 'apply_lastvit') and getattr(dec, 'use_lastvit', False)
+                            and getattr(dec, 'lastvit_layer', -1) == -1):
                         fused = dec.apply_lastvit(fused)
-                        if getattr(dec, 'use_lastvit', False):
-                            hier = hier + [fused]
+                        hier = hier + [fused]
                     dec_outs[key] = dec.conv_depth(fused)
                     dec_hier[key] = hier
                 else:
@@ -306,6 +306,7 @@ def build_depther(
     peft_config: dict | None = None,
     lastvit_context: bool = False,
     lastvit_gamma: float = 1.0,
+    lastvit_layer: int = -1,
     **kwargs,
 ):
     # 处理 Decode_Type：统一转换为列表，便于统一处理
@@ -349,6 +350,7 @@ def build_depther(
             # parameter-free LaSt-ViT global context injection (Eq. 4-7)
             decoder_dict[dt].use_lastvit = True
             decoder_dict[dt].lastvit_gamma = lastvit_gamma
+            decoder_dict[dt].lastvit_layer = lastvit_layer
 
 
     depther = Depther(

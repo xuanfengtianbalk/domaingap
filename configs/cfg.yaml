@@ -19,6 +19,7 @@ MODEL:
     vpt_n_prompts: 10
   LASTVIT_CONTEXT: false   # LaSt-ViT global context injection in decoder (parameter-free)
   LASTVIT_GAMMA: 1.0       # injection strength: fused' = fused + gamma * g
+  LASTVIT_LAYER: -1        # injection layer: -1=projected fused, 0..3=fusion stage
 
 EVIDENTIAL:
   lamb: 0.001

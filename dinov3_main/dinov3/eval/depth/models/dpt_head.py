@@ -518,8 +518,15 @@ class DPTHead(nn.Module):
         out = self.fusion_blocks[0](x[-1])
         hier = [out] if return_hier else None
 
+        # LaSt-ViT per-stage injection: modulate a specific fusion stage
+        lv_layer = getattr(self, 'lastvit_layer', -1)
+        if getattr(self, 'use_lastvit', False) and lv_layer == 0:
+            out = self.apply_lastvit(out)
+
         for i in range(1, len(self.fusion_blocks)):
             out = self.fusion_blocks[i](out, x[-(i + 1)])
+            if getattr(self, 'use_lastvit', False) and lv_layer == i:
+                out = self.apply_lastvit(out)
             if return_hier:
                 hier.append(out)
 
@@ -544,9 +551,11 @@ class DPTHead(nn.Module):
             out = self.forward_features(inputs)
             hier = None
 
-        out = self.apply_lastvit(out)
-        if hier is not None and getattr(self, 'use_lastvit', False):
-            hier.append(out)    # expose the injected feature to probes
+        # layer -1: inject at the projected fused feature (post forward_features)
+        if getattr(self, 'use_lastvit', False) and getattr(self, 'lastvit_layer', -1) == -1:
+            out = self.apply_lastvit(out)
+            if hier is not None:
+                hier.append(out)    # expose the injected feature to probes
 
         if return_hier:
             return self.conv_depth(out), hier
