@@ -1,4 +1,5 @@
 import argparse
+import math
 import yaml
 import os
 import multiprocessing
@@ -98,9 +99,11 @@ def build_optimizer(config, model):
     print('OPTIM: ',optimizer_name)
     param_groups = [p for p in model.parameters() if p.requires_grad]
     if optimizer_name == 'SGD':
-        optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9, weight_decay=1e-4)
+        wd = float(train_config.get('WEIGHT_DECAY', 1e-4))
+        optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9, weight_decay=wd)
     elif optimizer_name == 'AdamW':
-        optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=5e-2, betas=(0.9, 0.95))
+        wd = float(train_config.get('WEIGHT_DECAY', 5e-2))
+        optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=wd, betas=(0.9, 0.95))
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
     return optimizer
@@ -145,6 +148,25 @@ def get_warmup_scheduler(optimizer: Optimizer, warmup_steps: int = 1000, warmup_
             # 线性增加：从 start_factor 到 1.0
             return warmup_start_factor + (1.0 - warmup_start_factor) * (current_step / warmup_steps)
         return 1.0  # 预热结束后保持原学习率（可后续再使用其他调度器）
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def get_anneal_scheduler(optimizer: Optimizer, total_steps: int, lr_start: float,
+                         lr_end: float, warmup_steps: int = 1000):
+    """
+    Cosine annealing scheduler: linear warmup from 0 to lr_start over
+    warmup_steps, then cosine decay from lr_start to lr_end over the
+    remaining steps.
+    """
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        t = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+        t = min(max(t, 0.0), 1.0)
+        frac = 0.5 * (1.0 + math.cos(math.pi * t))
+        lr = lr_end + (lr_start - lr_end) * frac
+        return lr / lr_start
 
     return LambdaLR(optimizer, lr_lambda)
 
@@ -302,12 +324,13 @@ class Criterion:
 
 
 
-    def forward(self, outputs,imageshapes,target_dict):
+    def forward(self, outputs, imageshapes, target_dict, pixel_weights=None):
         """
         计算损失
         Args:
             pred: 模型预测值 (logits 或原始输出)
             target: 标签 (与 loss 函数要求一致)
+            pixel_weights: 可选 [B,1,H,W] 逐像素权重（仅 DER 分支 NLL 加权）
         Returns:
             loss: 标量张量
         """
@@ -346,7 +369,10 @@ class Criterion:
             logb = outputs['logb'].permute(0,2,3,1)[mask]
             gt   = target_dict['coordinates'].permute(0,2,3,1)[mask]
             if c.shape[0] > 0:
-                total_loss += self.evi_loss(c, logl, loga, logb, gt)
+                w_p = None
+                if pixel_weights is not None:
+                    w_p = pixel_weights.permute(0, 2, 3, 1)[mask].squeeze(-1)
+                total_loss += self.evi_loss(c, logl, loga, logb, gt, w_p)
             total_loss += self.los_fnc['mask'](outputs['mask'].squeeze(1), target_dict['mask'])
         if 'coordinates_gs_EDL' in self.model_type:
             mask = (target_dict['mask'] > 0.5)
@@ -369,8 +395,8 @@ class Criterion:
         return total_loss
 
     # 也可以直接使用 __call__ 让实例像函数一样调用
-    def __call__(self, outputs,imageshapes,target_dict):
-        return self.forward(outputs,imageshapes,target_dict)
+    def __call__(self, outputs, imageshapes, target_dict, pixel_weights=None):
+        return self.forward(outputs, imageshapes, target_dict, pixel_weights)
 
 
 def parse_args():
@@ -390,6 +416,15 @@ def parse_args():
                         help='Which training script to use')
     parser.add_argument('--train_backbone', action='store_true', default=False,
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
+    parser.add_argument('--freeze_backbone', action='store_true', default=False,
+                        help='Freeze the encoder entirely (LP-FT stage 1: train head only)')
+    parser.add_argument('--no_peft', action='store_true', default=False,
+                        help='Build model without PEFT (for full fine-tuned checkpoints)')
+    parser.add_argument('--wise_alpha', type=float, default=None,
+                        help='evaluate mode: WiSE-FT interpolation factor alpha on LoRA delta '
+                             '(effective encoder weight = W + alpha * BA)')
+    parser.add_argument('--soup_paths', type=str, nargs='+', default=None,
+                        help='evaluate mode: workingdir UUIDs of models to average (uniform soup)')
     parser.add_argument('--resume_path', type=str, default='',
                         help='Workingdir UUID path for evaluate mode')
     parser.add_argument('--padded', action='store_true', default=False,
@@ -410,6 +445,8 @@ def main():
     if args.model_type is not None:
         config['MODEL']['TYPE'] = args.model_type
     config['MODEL']['TRAIN_BACKBONE'] = args.train_backbone
+    if args.no_peft:
+        config['MODEL']['PEFT'] = {'method': 'none'}
     config['MODEL']['MIXSTYLE'] = config['TRAIN'].get('MIXSTYLE', False)
     config['MODEL']['MIXSTYLE_P'] = config['TRAIN'].get('MIXSTYLE_P', 0.5)
     config['MODEL']['MIXSTYLE_ALPHA'] = config['TRAIN'].get('MIXSTYLE_ALPHA', 0.1)
@@ -437,10 +474,52 @@ def main():
         model = torch.nn.DataParallel(model, device_ids=args.gpu)
         print(f"Using DataParallel on GPUs: {args.gpu}")
 
+    if args.freeze_backbone:
+        # LP-FT stage 1: freeze the encoder, train only the head/decoder
+        for p in model.encoder.parameters():
+            p.requires_grad_(False)
+        if is_master:
+            print("[LP-FT stage 1] encoder frozen, training head only")
+
     if args.mode == 'evaluate':
-        checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location=device)
-        model.load_state_dict(checkpoint, strict=True)
-        end_path_name = f'workingdir/{args.resume_path}'
+        if args.soup_paths:
+            # Model Soups (ICML 2022) uniform soup: equal-weight average of
+            # state dicts from models with the same architecture
+            assert args.resume_path == '', 'soup_paths replaces resume_path'
+            sds = []
+            for u in args.soup_paths:
+                sd = torch.load(f'workingdir/{u}/model_final.pth', map_location='cpu')
+                sds.append(sd)
+            soup = {k: torch.stack([sd[k] for sd in sds]).mean(dim=0) for k in sds[0].keys()}
+            model.load_state_dict(soup, strict=True)
+            tag = '_'.join(u[:4] for u in args.soup_paths)
+            end_path_name = f'workingdir/soup_uniform_{len(sds)}models_{tag}'
+            os.makedirs(end_path_name, exist_ok=True)
+            if is_master:
+                print(f'Uniform soup of {len(sds)} models: {args.soup_paths}')
+        elif args.wise_alpha is not None:
+            # WiSE-FT (CVPR 2022) theta = (1-alpha)*theta0 + alpha*theta1,
+            # applied to effective encoder weights: with theta0 the DINOv3
+            # pretrained backbone and theta1 the LoRA-finetuned model
+            # (W + BA), interpolation gives W + alpha*BA. Implemented by
+            # scaling the merged LoRA delta (lora_B) by alpha.
+            checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location=device)
+            model.load_state_dict(checkpoint, strict=True)
+            from dinov3.eval.depth.models.peft import LoRAMergedLinear
+            n_adapted = 0
+            for m in model.modules():
+                if isinstance(m, LoRAMergedLinear):
+                    m.lora_B.data.mul_(args.wise_alpha)
+                    n_adapted += 1
+            assert n_adapted > 0, 'no LoRA layers found for WiSE-FT'
+            end_path_name = f'workingdir/{args.resume_path}_wise{args.wise_alpha:g}'
+            os.makedirs(end_path_name, exist_ok=True)
+            if is_master:
+                print(f'WiSE-FT alpha={args.wise_alpha}: scaled LoRA delta of {n_adapted} qkv layers')
+        else:
+            checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location=device)
+            model.load_state_dict(checkpoint, strict=True)
+            end_path_name = f'workingdir/{args.resume_path}'
     elif args.mode != 'train' or args.resume is True:
         if args.resume_path:
             checkpoint = torch.load(f'workingdir/{args.resume_path}/model_final.pth', map_location='cuda:0')
@@ -539,24 +618,53 @@ def main():
 
         criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc, evi_loss=evi_loss, evi_cls_loss=evi_cls_loss)
         optimizer = build_optimizer(config, model)
-        scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
+
+        # ── L2-SP components (ICML 2018, official code mode 1) ──
+        l2sp = None
+        l2sp_alpha = float(config['TRAIN'].get('L2SP_ALPHA', 0.0))
+        l2sp_beta = float(config['TRAIN'].get('L2SP_BETA', 0.01))
+        if l2sp_alpha > 0:
+            existing, new_params = [], []
+            for n, p in model.named_parameters():
+                if not p.requires_grad or 'weight' not in n:
+                    continue
+                if n.startswith('encoder.backbone'):
+                    existing.append((p, p.detach().clone()))
+                else:
+                    new_params.append(p)
+            l2sp = {'alpha': l2sp_alpha, 'beta': l2sp_beta,
+                    'existing': existing, 'new': new_params}
+            if is_master:
+                print(f"[L2-SP] alpha={l2sp_alpha} beta={l2sp_beta} "
+                      f"existing_layers={len(existing)} new_layers={len(new_params)}")
 
         # ── Stable Learning components ──
         stable_state = None
         rff = None
+        sl_pixel_mode = False
+        sl_grid_size = 32
         if args.train_script == 'train_stable':
             from Hyperpose_net.losses.stable_learning import RFFTransform, StableNetState
             sl_cfg = config.get('STABLE_LEARNING', {})
-            in_dim = get_backbone_embed_dim(model, config['MODEL']['BACKBONE_NAME'])
+            sl_pixel_mode = bool(sl_cfg.get('pixel_mode', False))
+            sl_decorr_reg = bool(sl_cfg.get('decorr_reg', False))
+            sl_grid_size = int(sl_cfg.get('grid_size', 32))
             num_f = int(sl_cfg.get('num_f', 1))
-            n_feature = int(sl_cfg.get('n_feature', 0)) or int(config['TRAIN']['BATCH_SIZE'])
+            batch_size = int(config['TRAIN']['BATCH_SIZE'])
+            if sl_pixel_mode or sl_decorr_reg:
+                # decoder-feature modes: features = last fusion stage (256ch)
+                in_dim = 256
+                n_feature = batch_size * sl_grid_size * sl_grid_size
+            else:
+                in_dim = get_backbone_embed_dim(model, config['MODEL']['BACKBONE_NAME'])
+                n_feature = int(sl_cfg.get('n_feature', 0)) or batch_size
             rff = RFFTransform(in_dim, num_f,
                                float(sl_cfg.get('rff_sigma', 1.0))).to(device)
             stable_state = StableNetState(n_feature, in_dim,
                                           float(sl_cfg.get('presave_ratio', 0.9)),
                                           device=device)
             if is_master:
-                print(f"[Stable Learning] feature_dim={in_dim} num_f={num_f} n_feature={n_feature} enable={sl_cfg.get('enable', False)}")
+                print(f"[Stable Learning] feature_dim={in_dim} num_f={num_f} n_feature={n_feature} pixel_mode={sl_pixel_mode} decorr_reg={sl_decorr_reg} grid={sl_grid_size} enable={sl_cfg.get('enable', False)}")
 
         # ── L2SDG components ──
         wae = None
@@ -571,6 +679,19 @@ def main():
                 print(f"[L2SDG] latent={l2_cfg.get('latent_dim', 128)} epsilon={l2_cfg.get('epsilon', 8.0)} enable={l2_cfg.get('enable', False)}")
 
         epochs = config['TRAIN']['MAX_EPOCH']
+        lr_schedule = config['TRAIN'].get('LR_SCHEDULE', 'warmup')
+        if lr_schedule == 'anneal':
+            lr_start = float(config['TRAIN'].get('LR', 1e-4))
+            lr_end = float(config['TRAIN'].get('LR_END', 2e-6))
+            warmup_steps = int(config['TRAIN'].get('LR_WARMUP', 1000))
+            total_steps = epochs * len(train_loader)
+            scheduler = get_anneal_scheduler(optimizer, total_steps, lr_start,
+                                             lr_end, warmup_steps=warmup_steps)
+            if is_master:
+                print(f"[LR] cosine anneal {lr_start} -> {lr_end} over "
+                      f"{total_steps} steps (warmup {warmup_steps})")
+        else:
+            scheduler = get_warmup_scheduler(optimizer, warmup_steps=1000)
         for epoch in range(epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
@@ -592,6 +713,11 @@ def main():
                                                     lambda_decay_rate=float(sl_cfg.get('lambda_decay_rate', 1)),
                                                     lambda_decay_epoch=int(sl_cfg.get('lambda_decay_epoch', 5)),
                                                     min_lambda_times=float(sl_cfg.get('min_lambda_times', 0.01)),
+                                                    pixel_mode=sl_pixel_mode,
+                                                    grid_size=sl_grid_size,
+                                                    decorr_reg=bool(sl_cfg.get('decorr_reg', False)),
+                                                    decorr_lambda=float(sl_cfg.get('decorr_lambda', 100.0)),
+                                                    lastvit_weight=bool(sl_cfg.get('lastvit_weight', False)),
                                                     enable=bool(sl_cfg.get('enable', False)))
             elif args.train_script == 'train_l2sdg':
                 from train_l2sdg import train_one_epoch_l2sdg
@@ -604,7 +730,7 @@ def main():
                                                    perturb_steps=int(l2_cfg.get('perturb_steps', 1)),
                                                    enable=bool(l2_cfg.get('enable', False)))
             else:
-                train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device)
+                train_loss = train_one_epoch(model, train_loader, config['MODEL']['TYPE'], criterion, optimizer, scheduler, device, l2sp=l2sp)
             if is_master:
                 print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
 

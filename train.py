@@ -1,6 +1,11 @@
 import torch
 from tqdm import tqdm
-def train_one_epoch(model, dataloader, model_type, criterion, optimizer, scheduler, device):
+def train_one_epoch(model, dataloader, model_type, criterion, optimizer, scheduler, device, l2sp=None):
+    """l2sp: dict with keys alpha, beta, existing [(w, w0)], new [w] —
+    L2-SP (ICML 2018) penalty, mirroring the official TensorFlow code:
+        loss += alpha * sum(0.5 * ||w - w0||^2) over existing 'weights'
+        loss += beta  * sum(0.5 * ||w||^2)    over new 'weights'
+    """
     model.train()
     losses_epoch = []
     pbar = tqdm(dataloader, desc="Training", ncols=80)
@@ -39,6 +44,23 @@ def train_one_epoch(model, dataloader, model_type, criterion, optimizer, schedul
         pbar.set_postfix(loss=f"{losses.item():.4f}", lr=optimizer.param_groups[0]['lr'])
         optimizer.zero_grad()
         losses.backward()
+        if l2sp is not None:
+            # L2-SP (ICML 2018) decay applied directly to gradients, equivalent
+            # to adding alpha/2*||w-w0||^2 + beta/2*||w||^2 to the loss
+            # (official TF code computes decay terms in the loss; gradient
+            # injection matches that for SGD-momentum and avoids graph bloat)
+            for w, w0 in l2sp['existing']:
+                grad = l2sp['alpha'] * (w - w0)
+                if w.grad is None:
+                    w.grad = grad
+                else:
+                    w.grad += grad
+            for w in l2sp['new']:
+                grad = l2sp['beta'] * w
+                if w.grad is None:
+                    w.grad = grad
+                else:
+                    w.grad += grad
         optimizer.step()
         scheduler.step()
         losses_epoch.append(losses.detach().cpu())
