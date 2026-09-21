@@ -1,4 +1,4 @@
-# Stable Learning（StableNet）消融实验总结
+# Stable Learning（StableNet）与 LaSt-ViT 消融实验总结
 
 > 实验日期：2026-09
 > 代码分支：`contrastive_dg`（commit `a561d91` / `ae79bc2` / `733a23b`）
@@ -162,6 +162,45 @@ R1 每个指标都精确落在 plain 区间内（sunlamp 3.93 ∈ [3.85, 3.98]�
 - 补全论文 k 组全局记忆（当前 n_feature=1×batch）。
 
 **在当前"收敛 checkpoint + 10 epoch 微调"协议下，StableNet 无优化空间，判定为无效（null result）。**（decoder 特征实验已排除"特征源"这一变量。）
+
+补充（lr=1e-4 档）：decorr 直接去相关在大 lr 下同样无效——`decorr λ=1 @ lr1e-4`（sunlamp 4.44 / lightbox 3.81 / val 0.90）≈ `B plain @ lr1e-4`（4.57 / 3.87 / 0.83），`λ=10` 更差（4.95）。大 lr 协议本身有害，去相关救不回来。
+
+### 4.5 LaSt-ViT 方向（独立于 StableNet，同样 null）
+
+**论文**（CVPR 2026, "Vision Transformers Need More Than Registers"）：ViT artifacts 的根因是 lazy aggregation——CLS 聚合被背景 patch 短路主导。解法 LaSt-ViT：把 CLS 聚合替换为"逐通道 top-K 稳定 patch 均值"（FFT+高斯低通+稳定性分数，参数自由），梯度经被选中的 patch 流回模型，训练模型依赖前景。
+
+**我们的忠实迁移**：稠密架构没有 CLS 聚合点 → 在 decoder 前向里引入 `lastvit_context`（Eq.4-7 逐位一致、可微、零参数），注入回融合特征：`fused' = fused + γ·g`。训练时梯度流经被选中的稳定 patch。
+
+**PiB 分析**（Patch Score 最高分是否落在卫星 mask 内，400 图）：
+
+| 指标 | PiB |
+|---|---|
+| encoder patch↔CLS | 0.89（健康，无 lazy aggregation） |
+| decoder cell↔GAP | 0.21（**lazy aggregation 病灶在 decoder**） |
+| LaSt-ViT vote | 0.53（投票机制优于 GAP 聚合） |
+
+**5 个注入层的 10ep 消融**（全部 lr=2e-6, seed42, γ=1.0）：
+
+| 注入层 | sunlamp | lightbox | val | vs plain |
+|---|---|---|---|---|
+| plain R0a/R0b（锚点） | 3.85 / 3.98 | 3.27 / 3.35 | 0.61 | — |
+| -1（project 后） | 4.18 | 3.55 | 0.71 | ✗ |
+| 0（最粗 fusion） | 4.10 | 3.29 | 0.61 | ✗（最优层，sunlamp 仍差 0.2°+） |
+| 1 | 4.09 | 3.31 | 0.61 | ✗ |
+| 2 | 4.03 | 3.44 | 0.65 | ✗ |
+| 3（最细 fusion） | 4.46 | 3.59 | 0.74 | ✗（几乎退回基线） |
+
+**LaSt-ViT 判定**：注入越早越好（0/1 最优）、越晚越差（3 近基线）——但**没有任何层超过 plain 区间**。冻结模型上直接注入降 PiB（机制是训练期的，预期）；带注入训练 10ep 后模型适应了（loss +9→-3），但最终指标仍 ≤ plain。"梯度流经稳定 patch 重塑模型"在 10ep 微调尺度上没有收益。
+
+### 4.6 三条路线的最终闭环
+
+```
+StableNet 间接 w（图像级/像素级）      → w 激活或不激活，任务结果 ≡ plain
+StableNet 直接去相关正则（lr 1e-4/2e-6）→ lossb 被真实压降（8-44×），任务结果 ≡ plain
+LaSt-ViT 忠实聚合注入（5 个 decoder 层）→ 机制真实训练模型，任务结果 ≤ plain
+⇒ 在"收敛 checkpoint + 小 lr 微调"协议下，任何训练期干预都无法超越 plain 微调
+⇒ 唯一有效方案：lr=2e-6 plain 微调（sunlamp 3.85 -14% / lightbox 3.27 -10% / val 0.61 -31%）
+```
 
 ---
 

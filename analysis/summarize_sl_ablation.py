@@ -83,6 +83,22 @@ RUNS = [
      True, 3, 30, 1.0, 70.0, "2e-6", ""),
     ("seed_verify", "S45_lr2e-6", "ca30883e-54be-4d77-ad51-130150b129b8",
      True, 3, 30, 1.0, 70.0, "2e-6", ""),
+    # ── decorr @ lr=1e-4（stable learning 大 lr 收尾）──
+    ("lr1e-4_decorr", "E1_decorr_lam1", "98ec02c1-ad7f-43aa-9c6d-39b8bb93289b",
+     True, 3, 30, 1.0, 70.0, "1e-4", "decorr_reg,lambda=1"),
+    ("lr1e-4_decorr", "E2_decorr_lam10", "6ddf2440-7bf1-4f8c-a28d-571ff040cd07",
+     True, 3, 30, 1.0, 70.0, "1e-4", "decorr_reg,lambda=10"),
+    # ── LaSt-ViT 忠实注入（decoder 各层, γ=1.0, lr=2e-6）──
+    ("lastvit", "LV_layer-1_proj", "fcc07591-27d1-4c35-92d5-f5e40c84760f",
+     False, 3, 30, 1.0, 70.0, "2e-6", "LASTVIT_CONTEXT,layer=-1"),
+    ("lastvit", "LV_layer0", "ccd044f6-193e-4047-9863-e8631c1a5bf4",
+     False, 3, 30, 1.0, 70.0, "2e-6", "LASTVIT_CONTEXT,layer=0"),
+    ("lastvit", "LV_layer1", "26d2d5ee-2a61-4a53-81fa-38043f506f8e",
+     False, 3, 30, 1.0, 70.0, "2e-6", "LASTVIT_CONTEXT,layer=1"),
+    ("lastvit", "LV_layer2", "9c09911b-2d57-48a2-aa7f-b4c6bc2ea58a",
+     False, 3, 30, 1.0, 70.0, "2e-6", "LASTVIT_CONTEXT,layer=2"),
+    ("lastvit", "LV_layer3", "c5a74357-c18d-4ff0-b09c-311f7ba603ef",
+     False, 3, 30, 1.0, 70.0, "2e-6", "LASTVIT_CONTEXT,layer=3"),
     # ── decoder 分层特征实验（lr=2e-6）──
     ("decoder", "D_R1_lam1_s42_10ep", "b7e907b2-fcf8-43af-9840-7b8483f04836",
      True, 3, 30, 1.0, 1.0, "2e-6", "decoder特征,lambdap=1,w强激活"),
