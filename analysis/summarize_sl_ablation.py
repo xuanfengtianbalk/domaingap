@@ -14,7 +14,7 @@ OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "outputs", "sl_ablation
 
 # 共同协议（所有 stable 微调 run 一致）
 COMMON = ("e24d72fb续训;coordinates_DER;vitl16;lora_r1;AdamW;batch16;augmix;10ep;seed42;"
-          "presave_ratio=0.9;epochp=0;n_feature=16;decay_pow=2;first_step_cons=1")
+          "presave_ratio=0.9;epochp=0;n_feature=16(1xbatch,k组全局记忆未实现);decay_pow=2;first_step_cons=1")
 
 # (group, run, uuid, enable, num_f, epochb, lrbl, lambdap, train_lr, note)
 RUNS = [

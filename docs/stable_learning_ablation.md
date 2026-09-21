@@ -202,6 +202,8 @@ LaSt-ViT 忠实聚合注入（5 个 decoder 层）→ 机制真实训练模型�
 ⇒ 唯一有效方案：lr=2e-6 plain 微调（sunlamp 3.85 -14% / lightbox 3.27 -10% / val 0.61 -31%）
 ```
 
+**实现局限声明**：本实验的 StableNet 全局记忆为**单槽 1×batch 表**（跟随官方 repo 的简化实现）。论文原式的 **k 组全局记忆**（Eq.9-10：k 组预存特征、k 个不同平滑系数 αᵢ、presaved size=k×batch，Fig.3c 的消融轴）**未实现、未测试**。因此严格结论应表述为"在 1×batch 全局记忆实现下无效"。主因（lossb≈0、lossp 锁死、小 lr 下模型位移趋零）与全局记忆大小正交，补齐 k 组后大概率仍为 null，但未经实验验证。
+
 ---
 
 ## 5. 复现命令
@@ -230,5 +232,5 @@ cd analysis && python summarize_sl_ablation.py
 | epochb | 20 | BALANCING EPOCH NUMBER | 每 batch 内层迭代 |
 | lambdap | 70.0 | 无（附录仅提 regularizer 0.3） | lossb 的除数，实现层参数 |
 | num_f | 1 | 消融图 3(a)（10x/0.3x） | RFF 频率空间数 |
-| n_feature | 128=batch | 消融图 3(c) presaved size | 全局表容量（我们 16=1×batch） |
+| n_feature | 128=batch（官方简化） | k×batch，k 组各带 αᵢ（Eq.9-10；Fig.3c 消融轴） | 我们 16=1×batch 单槽；**k 组设计未实现未测试** |
 | presave_ratio | 0.9 | Eq.10 αᵢ | 全局表 EMA |
