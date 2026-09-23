@@ -490,7 +490,12 @@ def main():
             for u in args.soup_paths:
                 sd = torch.load(f'workingdir/{u}/model_final.pth', map_location='cpu')
                 sds.append(sd)
-            soup = {k: torch.stack([sd[k] for sd in sds]).mean(dim=0) for k in sds[0].keys()}
+            soup = {}
+            for k in sds[0].keys():
+                if sds[0][k].dtype in (torch.int64, torch.bool):
+                    soup[k] = sds[0][k]
+                else:
+                    soup[k] = torch.stack([sd[k] for sd in sds]).mean(dim=0)
             model.load_state_dict(soup, strict=True)
             tag = '_'.join(u[:4] for u in args.soup_paths)
             end_path_name = f'workingdir/soup_uniform_{len(sds)}models_{tag}'

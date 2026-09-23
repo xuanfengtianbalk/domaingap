@@ -110,6 +110,30 @@ RUNS = [
      True, 3, 30, 1.0, 10.0, "2e-6", "1ep诊断,lambdap=10"),
 ]
 
+# ── 微调方法对比轮（DINOv3预训练+新头, 50ep 退火 1e-4→2e-6）──
+COMMON_FT = ("DINOv3预训练+新头;coordinates_DER;vitl16;batch16;augmix;seed42;"
+             "50ep;cosine退火1e-4->2e-6;warmup1000")
+FT_RUNS = [
+    ("ft_methods", "FT_LoRA_anchor_50ep", "25e06910-052f-4a3c-93b9-3612999915b7",
+     "-", "-", "-", "-", "-", "anneal", "忠实LoRA(官方MergedLinear,qv,r1,α/r,kaiming)"),
+    ("ft_methods", "FT_LPFT_s1_head25ep", "99fa6859-8ff0-4701-bb92-0279bd1e29b0",
+     "-", "-", "-", "-", "-", "anneal", "LP-FT阶段1:冻结encoder仅训头25ep"),
+    ("ft_methods", "FT_LPFT_final_25+25", "240f0e28-f3b8-4ef1-a4a8-095040e764cd",
+     "-", "-", "-", "-", "-", "anneal", "LP-FT两阶段(25头+25联合)"),
+    ("ft_methods", "FT_L2SP_alpha0.01", "46bf9c64-9e6c-40d0-a67b-3802b6c2ec9e",
+     "-", "-", "-", "-", "-", "anneal", "L2-SP α=0.01 β=0.01 SGD mom0.9 全量"),
+    ("ft_methods", "FT_L2SP_alpha0.1", "803126e6-2b60-425c-b719-688be43c3f66",
+     "-", "-", "-", "-", "-", "anneal", "L2-SP α=0.1 β=0.01 SGD mom0.9 全量"),
+    ("ft_methods", "FT_wiseft_a0.3", "25e06910-052f-4a3c-93b9-3612999915b7_wise0.3",
+     "-", "-", "-", "-", "-", "-", "WiSE-FT α=0.3(LoRA delta缩放,零训练)"),
+    ("ft_methods", "FT_wiseft_a0.5", "25e06910-052f-4a3c-93b9-3612999915b7_wise0.5",
+     "-", "-", "-", "-", "-", "-", "WiSE-FT α=0.5"),
+    ("ft_methods", "FT_wiseft_a0.7", "25e06910-052f-4a3c-93b9-3612999915b7_wise0.7",
+     "-", "-", "-", "-", "-", "-", "WiSE-FT α=0.7"),
+    ("ft_methods", "FT_soup_3models", "soup_uniform_3models_8031_46bf_240f",
+     "-", "-", "-", "-", "-", "-", "均匀soup{L2SP0.1,L2SP0.01,LPFT}(2成员已崩)"),
+]
+
 
 def load_metrics(uuid, split):
     """返回 (angle_mean, angle_std, dist_mean) 或 (None, None, None)"""
@@ -144,6 +168,18 @@ def main():
                 f"{dm:.4f}" if dm is not None else "",
             ]
         row.append(COMMON)
+        rows.append(row)
+
+    for group, name, uuid, enable, num_f, epochb, lrbl, lambdap, lr, note in FT_RUNS:
+        row = [group, name, uuid, enable, num_f, epochb, lrbl, lambdap, lr, note]
+        for split in ["sunlamp", "lightbox", "validation"]:
+            am, asd, dm = load_metrics(uuid, split)
+            row += [
+                f"{am:.4f}" if am is not None else "",
+                f"{asd:.4f}" if asd is not None else "",
+                f"{dm:.4f}" if dm is not None else "",
+            ]
+        row.append(COMMON_FT)
         rows.append(row)
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
