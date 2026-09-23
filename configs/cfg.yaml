@@ -18,6 +18,7 @@ MODEL:
     lora_rank: 4
     lora_alpha: 4          # LoRA scaling = alpha/rank (microsoft/LoRA; default=rank)
     lora_dropout: 0.0      # LoRA input dropout (microsoft/LoRA; default 0)
+    use_dora: false        # DoRA weight decomposition (HF PEFT use_dora semantics)
     vpt_n_prompts: 10
   LASTVIT_CONTEXT: false   # LaSt-ViT global context injection in decoder (parameter-free)
   LASTVIT_GAMMA: 1.0       # injection strength: fused' = fused + gamma * g
@@ -77,6 +78,7 @@ TRAIN:
   WEIGHT_DECAY: 5e-2        # optimizer weight decay override (AdamW default)
   L2SP_ALPHA: 0.0           # L2-SP (ICML 2018) existing-layer penalty, 0=off
   L2SP_BETA: 0.01           # L2-SP new-layer penalty (official cross-validated)
+  LLRD_DECAY: 0.0           # layer-wise lr decay (Sun et al. 2019); 0=off, e.g. 0.9
   STYLEAUG_P: 0.0           # probability of applying StyleAugmentor
   STYLEAUG_ALPHA: 0.3       # style mixing strength
   MIXSTYLE: false  # MixStyle domain generalization (default off)

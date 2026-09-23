@@ -91,13 +91,14 @@ def build_model(config):
 
     return model, bc
 
-def build_optimizer(config, model):
+def build_optimizer(config, model, param_groups=None):
     """根据配置构建优化器"""
     train_config = config['TRAIN']
     lr = float(train_config['LR'])
     optimizer_name = train_config.get('OPTIM', 'SGD')
     print('OPTIM: ',optimizer_name)
-    param_groups = [p for p in model.parameters() if p.requires_grad]
+    if param_groups is None:
+        param_groups = [p for p in model.parameters() if p.requires_grad]
     if optimizer_name == 'SGD':
         wd = float(train_config.get('WEIGHT_DECAY', 1e-4))
         optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9, weight_decay=wd)
@@ -107,6 +108,33 @@ def build_optimizer(config, model):
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
     return optimizer
+
+
+def build_llrd_param_groups(model, lr, decay):
+    """Layer-wise learning rate decay (LLRD, Sun et al. 2019; standard ViT
+    fine-tuning practice): head/decoder at base lr, backbone blocks decay
+    geometrically with depth (top block = base lr, bottom block = lr*decay^(n-1)),
+    patch_embed/other backbone params at the deepest decay."""
+    n_blocks = len(model.encoder.backbone.blocks)
+    top = {'params': [], 'lr': lr}
+    embed = {'params': [], 'lr': lr * decay ** n_blocks}
+    block_groups = [{'params': [], 'lr': lr * decay ** (n_blocks - 1 - i)}
+                    for i in range(n_blocks)]
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if not n.startswith('encoder.backbone'):
+            top['params'].append(p)
+        elif '.blocks.' in n:
+            i = int(n.split('.blocks.')[1].split('.')[0])
+            block_groups[i]['params'].append(p)
+        else:
+            embed['params'].append(p)
+    groups = [top]
+    groups += [g for g in block_groups if g['params']]
+    if embed['params']:
+        groups.append(embed)
+    return groups
 
 
 EMBED_DIM_MAP = {
@@ -418,6 +446,8 @@ def parse_args():
                         help='Unfreeze dinov3 backbone for training (default: frozen)')
     parser.add_argument('--freeze_backbone', action='store_true', default=False,
                         help='Freeze the encoder entirely (LP-FT stage 1: train head only)')
+    parser.add_argument('--ln_tune', action='store_true', default=False,
+                        help='Train only LayerNorm parameters (freeze everything else)')
     parser.add_argument('--no_peft', action='store_true', default=False,
                         help='Build model without PEFT (for full fine-tuned checkpoints)')
     parser.add_argument('--wise_alpha', type=float, default=None,
@@ -480,6 +510,19 @@ def main():
             p.requires_grad_(False)
         if is_master:
             print("[LP-FT stage 1] encoder frozen, training head only")
+
+    if args.ln_tune:
+        # LayerNorm tuning: train only LayerNorm parameters
+        for p in model.parameters():
+            p.requires_grad_(False)
+        n_ln = 0
+        for m in model.modules():
+            if isinstance(m, nn.LayerNorm):
+                for p in m.parameters():
+                    p.requires_grad_(True)
+                    n_ln += 1
+        if is_master:
+            print(f"[LN tuning] only LayerNorm trainable ({n_ln} tensors)")
 
     if args.mode == 'evaluate':
         if args.soup_paths:
@@ -622,7 +665,17 @@ def main():
                 lamb=float(evi_cls_cfg.get('lamb', 1e-3)))
 
         criterion = Criterion(model_type=config['MODEL']['TYPE'], bc=bc, evi_loss=evi_loss, evi_cls_loss=evi_cls_loss)
-        optimizer = build_optimizer(config, model)
+        llrd_decay = float(config['TRAIN'].get('LLRD_DECAY', 0.0))
+        if llrd_decay > 0:
+            lr_base = float(config['TRAIN'].get('LR', 1e-4))
+            groups = build_llrd_param_groups(model, lr_base, llrd_decay)
+            optimizer = build_optimizer(config, model, param_groups=groups)
+            if is_master:
+                print(f"[LLRD] layer-wise lr decay={llrd_decay}, "
+                      f"{len(groups)} param groups, lr range "
+                      f"[{groups[-1]['lr']:.2e}, {groups[0]['lr']:.2e}]")
+        else:
+            optimizer = build_optimizer(config, model)
 
         # ── L2-SP components (ICML 2018, official code mode 1) ──
         l2sp = None
