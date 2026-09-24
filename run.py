@@ -512,17 +512,16 @@ def main():
             print("[LP-FT stage 1] encoder frozen, training head only")
 
     if args.ln_tune:
-        # LayerNorm tuning: train only LayerNorm parameters
-        for p in model.parameters():
-            p.requires_grad_(False)
+        # LayerNorm tuning: freeze backbone except its LayerNorm layers;
+        # head/decoder (task-specific, randomly initialized) train normally
         n_ln = 0
-        for m in model.modules():
-            if isinstance(m, nn.LayerNorm):
-                for p in m.parameters():
-                    p.requires_grad_(True)
-                    n_ln += 1
+        for n, p in model.named_parameters():
+            if n.startswith('encoder.backbone'):
+                keep = '.norm' in n
+                p.requires_grad_(keep)
+                n_ln += int(keep)
         if is_master:
-            print(f"[LN tuning] only LayerNorm trainable ({n_ln} tensors)")
+            print(f"[LN tuning] backbone frozen except LayerNorm ({n_ln} tensors), head/decoder trainable")
 
     if args.mode == 'evaluate':
         if args.soup_paths:

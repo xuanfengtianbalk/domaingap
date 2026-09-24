@@ -124,12 +124,17 @@ class LoRAMergedLinear(nn.Module):
         W_eff = self.W + self.merge_AB() * self.scaling
         if self.use_dora and self.rank > 0:
             W3 = W_eff.view(len(self.enable_lora), self.out_chunk, self.in_features)
-            chunk_ids = self.lora_ind.view(len(self.enable_lora), -1)[:, 0].nonzero().flatten()
-            for j, cid in enumerate(chunk_ids):
-                Wc = W3[cid]
-                norm = Wc.norm(p=2, dim=0, keepdim=True).clamp(min=1e-6)
-                W3[cid] = Wc / norm * self.lora_magnitude[j]
-            W_eff = W3.view(self.out_features, self.in_features)
+            chunk_ids = self.lora_ind.view(len(self.enable_lora), -1)[:, 0].nonzero().flatten().tolist()
+            parts = []
+            j = 0
+            for c in range(len(self.enable_lora)):
+                Wc = W3[c]
+                if c in chunk_ids:
+                    norm = Wc.norm(p=2, dim=0, keepdim=True).clamp(min=1e-6)
+                    Wc = Wc / norm * self.lora_magnitude[j]
+                    j += 1
+                parts.append(Wc)
+            W_eff = torch.cat(parts, dim=0)
         return W_eff
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
