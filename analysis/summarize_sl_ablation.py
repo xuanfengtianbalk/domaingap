@@ -133,6 +133,21 @@ FT_RUNS = [
     ("ft_methods", "FT_soup_3models", "soup_uniform_3models_8031_46bf_240f",
      "-", "-", "-", "-", "-", "-", "均匀soup{L2SP0.1,L2SP0.01,LPFT}(2成员已崩)"),
 ]
+# ── 批2：固定 lr 1e-4 协议（无退火）──
+COMMON_FT2 = ("DINOv3预训练+新头;coordinates_DER;vitl16;batch16;augmix;seed42;"
+              "50ep;固定lr=1e-4;warmup1000")
+FT_RUNS2 = [
+    ("ft_methods", "FT_LPFT_fixed1e-4_s1", "dc4453b9-e619-4294-bf62-7d3bc3a93495",
+     "-", "-", "-", "-", "-", "1e-4", "LP-FT阶段1固定lr(冻结训头25ep)"),
+    ("ft_methods", "FT_LPFT_fixed1e-4_s2", "3d0bd107-cc17-4018-8c0d-b96a7835fbaf",
+     "-", "-", "-", "-", "-", "1e-4", "LP-FT固定lr最终(25+25,无退火)"),
+    ("ft_methods", "FT_LLRD_decay0.9", "8be5bc36-b5fb-495d-bc46-14681a3fc74b",
+     "-", "-", "-", "-", "-", "1e-4", "逐层lr衰减0.9,26组,全量微调"),
+    ("ft_methods", "FT_LNtune_50ep", "d249a850-f503-446c-8903-e5ae6ab45698",
+     "-", "-", "-", "-", "-", "1e-4", "LN tuning(backbone仅LN+头训练)"),
+    ("ft_methods", "FT_DoRA_r1", "43194aa6-adcc-429e-a2d6-a7a3df09d299",
+     "-", "-", "-", "-", "-", "1e-4", "DoRA(HF PEFT语义,qv块,r1)"),
+]
 
 
 def load_metrics(uuid, split):
@@ -180,6 +195,18 @@ def main():
                 f"{dm:.4f}" if dm is not None else "",
             ]
         row.append(COMMON_FT)
+        rows.append(row)
+
+    for group, name, uuid, enable, num_f, epochb, lrbl, lambdap, lr, note in FT_RUNS2:
+        row = [group, name, uuid, enable, num_f, epochb, lrbl, lambdap, lr, note]
+        for split in ["sunlamp", "lightbox", "validation"]:
+            am, asd, dm = load_metrics(uuid, split)
+            row += [
+                f"{am:.4f}" if am is not None else "",
+                f"{asd:.4f}" if asd is not None else "",
+                f"{dm:.4f}" if dm is not None else "",
+            ]
+        row.append(COMMON_FT2)
         rows.append(row)
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)

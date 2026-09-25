@@ -126,3 +126,91 @@ python -u run.py --gpu 1 --model_type coordinates_DER --MODEL.BACKBONE_NAME dino
   --no_peft --seed 42 --mode evaluate \
   --soup_paths 803126e6-2b60-425c-b719-688be43c3f66 46bf9c64-9e6c-40d0-a67b-3802b6c2ec9e 240f0e28-f3b8-4ef1-a4a8-095040e764cd
 ```
+
+---
+
+# 批 2（固定 lr=1e-4 协议）
+
+## 9. 协议变更
+
+按指示：后续所有 run **不再退火**，lr 固定 1e-4（warmup 1000 步后恒定）。同时 LP-FT 在固定 lr 下重跑一遍。
+
+## 10. 批 2 结果总表
+
+| Run | sunlamp | lightbox | val |
+|---|---|---|---|
+| **LLRD decay=0.9** | **4.29** | **2.87** | **0.77±0.68** |
+| LN tuning | 6.62 | 4.68 | 0.96 |
+| DoRA r=1 | 6.05 | 4.25 | 0.97 |
+| LP-FT 重跑 s1（仅训头，固定 1e-4） | 8.61 | 8.10 | 1.52 |
+| LP-FT 重跑 s2（25+25，固定 1e-4） | 12.94 | 5.11 | 0.87 |
+| 参照：LP-FT 退火版 | 4.22 | 2.89 | 0.46 |
+| 参照：LoRA 忠实锚点 | 4.86 | 3.74 | 0.74 |
+
+## 11. 批 2 判定
+
+### 11.1 LLRD：第二个有效方法
+
+- 逐层 lr 衰减（decay=0.9，26 组：头/decoder 1e-4，顶层 block 1e-4，逐层 ×0.9，底层 8.9e-6）达到 LP-FT 级别：lightbox 2.87（并列历史最佳）、sunlamp 4.29、val 0.77
+- 单阶段、无冻结切换、实现简单（参数分组）——与 LP-FT 并列为本项目唯二有效方法
+- 机制与全项目经验自洽："encoder 必须动，但要有节制"——LLRD 用逐层 lr 梯度实现了这个节制
+
+### 11.2 LP-FT 固定 lr 重跑崩了：退火是 LP-FT 的必要组成部分
+
+- 固定 1e-4 版 sunlamp 12.94 vs 退火版 4.22——联合阶段在恒定 1e-4 下训过头（终 loss -2.91 vs 退火版 -3.64）
+- 结论：**1e-4→2e-6 cosine 退火不是多余的协议冗余，是 LP-FT 生效的关键**
+
+### 11.3 LN tuning 无效（但优于纯冻结）
+
+- 6.62/4.68/0.96：差于 LoRA 锚点（4.86/3.74/0.74）
+- 但优于"完全冻结仅训头"（8.61/8.10/1.52 或 7.80/8.11/1.37）——backbone 的 LN 层提供了少量有效适配
+- 结论：仅 LN 的 backbone 适配不足；LLRD/LoRA/LP-FT 的 backbone 参与度都高于 LN
+
+### 11.4 DoRA 无效：确认 A 类"结构无感"假设
+
+- 6.05/4.25/0.97，差于 vanilla LoRA 锚点（4.86/3.74/0.74）
+- 与"rank 无感、忠实修正无增益"一致：低秩家族的结构改进（幅值/方向分解）在本任务同样无感
+- 该假设至此获得 3 条独立证据
+
+## 12. 两批合并后的最终结论
+
+```
+有效（按效果排序）:
+  1. LP-FT 两阶段（退火协议必需）  4.22 / 2.89 / 0.46
+  2. LLRD 逐层 lr 衰减（固定 1e-4） 4.29 / 2.87 / 0.77
+
+无效:
+  LoRA（忠实/旧变体、DoRA）、L2-SP（lr 协议不相容）、WiSE-FT（无 zero-shot 头）、
+  Soup（成员失效）、LN tuning（backbone 适配不足）
+
+跨方法规律:
+  - "encoder 必须动，但要有节制"是全部有效方法的共同特征
+    （LP-FT: 头先行+退火联合; LLRD: 浅层近冻结/深层满速）
+  - "节制"的实现方式有两种且都有效：时间维度（退火）+ 空间维度（逐层衰减）
+  - A 类结构差异（低秩家族）三次证伪：rank 无感、忠实修正无增益、DoRA 无增益
+```
+
+## 13. 批 2 事件记录
+
+- DoRA 首跑因 `effective_weight()` inplace 修改计算图张量崩溃（backward 报 version mismatch）；改为 `torch.cat` 无 inplace 组装后修复（`5e319db`）
+- LN tuning 首跑误冻结全部参数（含随机初始化的 DER 头，loss 卡 11.76 无法学习）；修正为"backbone 冻结仅 LN + 头/decoder 正常训练"，垃圾 run 已删
+- LN tuning 等待脚本 `pgrep -f "MAX_EPOCH 25"` 自匹配自身进程导致死等，改为直接启动
+
+## 14. 批 2 复现命令
+
+```bash
+COMMON="--mode train --train_script train --model_type coordinates_DER --MODEL.BACKBONE_NAME dinov3_vitl16 --TRAIN.BATCH_SIZE 16 --TRAIN.AUG_TYPE augmix --seed 42 --TRAIN.LR_WARMUP 1000 --TRAIN.LR 1e-4 --TRAIN.MAX_EPOCH 50"
+
+# LLRD
+python -u run.py --gpu 1 --train_backbone --MODEL.PEFT.method none --TRAIN.LLRD_DECAY 0.9 $COMMON
+
+# LN tuning
+python -u run.py --gpu 0 --no_peft --ln_tune $COMMON
+
+# DoRA
+python -u run.py --gpu 1 --MODEL.PEFT.method lora --MODEL.PEFT.lora_rank 1 --MODEL.PEFT.lora_alpha 1 --MODEL.PEFT.use_dora true $COMMON
+
+# LP-FT 固定 lr 重跑（25+25）
+python -u run.py --gpu 0 --train_backbone --freeze_backbone --MODEL.PEFT.method none --TRAIN.MAX_EPOCH 25 $COMMON
+python -u run.py --gpu 0 --resume --resume_path <s1_uuid> --train_backbone --MODEL.PEFT.method none --TRAIN.MAX_EPOCH 25 $COMMON
+```
