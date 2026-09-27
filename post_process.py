@@ -64,9 +64,10 @@ def pose_error(pred_t, pred_q, gt_t, gt_q):
 def compute_pose_error(qvecs, tvecs, qgt, rgt, is_true):
     # 以下为原始代码片段（仅将列表追加操作改为返回值）
     if is_true:
-        # 四元数计算误差角
-        qvecs = torch.tensor(qvecs).reshape(-1)
-        tvecs = torch.tensor(tvecs).reshape(-1)
+        # 四元数计算误差角（先合成 numpy 数组再转 tensor，避免
+        # torch.tensor(list of np arrays) 的慢路径与 UserWarning）
+        qvecs = torch.from_numpy(np.asarray(qvecs, dtype=np.float64)).reshape(-1)
+        tvecs = torch.from_numpy(np.asarray(tvecs, dtype=np.float64)).reshape(-1)
         qvecs = qvecs / torch.norm(qvecs)  # 归1化
         qgt_norm = qgt / torch.norm(qgt)   # 归1化
         # 计算误差角度

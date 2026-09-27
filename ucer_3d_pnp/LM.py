@@ -367,10 +367,8 @@ def solve_pnp_lm(pts_3d, pts_2d, K, covariances=None, initial_rvec=None, initial
             params = new_params
             last_error = error
             # lambda_ /= lambda_factor
-            print("接受更新")
         else:
             lambda_ /= lambda_factor
-            print(lambda_, new_error , error)
             # break
     # 提取最终结果
     rvec = params[:3]
