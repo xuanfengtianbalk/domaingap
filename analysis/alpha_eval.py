@@ -580,33 +580,47 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             angles, dists = [], []
             angles_full, dists_full = [], []
             for i, (samples, targets) in enumerate(tqdm(dl, desc=f"dump {split}", ncols=80)):
-                image = samples.to(device)
-                gtbbox = torch.round(targets["boxes"].squeeze())
-                qgt = targets["q_gt"].squeeze()
-                rgt = targets["r_gt"].squeeze()
-                with torch.no_grad(), torch.amp.autocast("cuda"):
-                    outputs_raw = model(image)
-                c = outputs_raw["c"].squeeze(0).cpu().numpy()
-                logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
-                loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
-                logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
-                mask_map = outputs_raw["mask"].squeeze(0).cpu().numpy()
-                np.savez_compressed(os.path.join(sp_dir, f"img_{i:06d}.npz"),
-                                    c=c, logl=logl, loga=loga, logb=logb, mask=mask_map,
-                                    q_gt=qgt.numpy(), r_gt=rgt.numpy(),
-                                    boxes=gtbbox.numpy())
+                npz_path = os.path.join(sp_dir, f"img_{i:06d}.npz")
+                if os.path.exists(npz_path):
+                    # resume: npz already dumped, skip the network forward,
+                    # recompute baseline from the saved arrays (no network)
+                    d = np.load(npz_path)
+                    c = d["c"]
+                    mask_map = d["mask"]
+                    qg_t = torch.from_numpy(d["q_gt"])
+                    rg_t = torch.from_numpy(d["r_gt"])
+                    gtb_np = d["boxes"]
+                else:
+                    image = samples.to(device)
+                    gtbbox = torch.round(targets["boxes"].squeeze())
+                    qgt = targets["q_gt"].squeeze()
+                    rgt = targets["r_gt"].squeeze()
+                    with torch.no_grad(), torch.amp.autocast("cuda"):
+                        outputs_raw = model(image)
+                    c = outputs_raw["c"].squeeze(0).cpu().numpy()
+                    logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+                    loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+                    logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+                    mask_map = outputs_raw["mask"].squeeze(0).cpu().numpy()
+                    np.savez_compressed(npz_path,
+                                        c=c, logl=logl, loga=loga, logb=logb, mask=mask_map,
+                                        q_gt=qgt.numpy(), r_gt=rgt.numpy(),
+                                        boxes=gtbbox.numpy())
+                    qg_t = qgt
+                    rg_t = rgt
+                    gtb_np = gtbbox.numpy()
                 # BASELINE (model-mask only) computed in-memory during the dump
                 c_b = c.copy()
                 m_b = (torch.sigmoid(torch.from_numpy(mask_map)) > 0.5).cpu().numpy()  # (1,H,W)
                 c_b[~np.broadcast_to(m_b, c_b.shape)] = float("nan")
                 try:
                     is_true, qvecs, tvecs = pose_calculats_from_coors(
-                        K, to_pnp_coors(torch.from_numpy(c_b)), gtbbox.numpy())
+                        K, to_pnp_coors(torch.from_numpy(c_b)), gtb_np)
                 except Exception:
                     is_true, qvecs, tvecs = False, None, None
                 if is_true:
                     err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(
-                        qvecs, tvecs, qgt, rgt, is_true)
+                        qvecs, tvecs, qg_t, rg_t, is_true)
                     angles.append(float(err_ori_deg))
                     dists.append(float(err_r_abs))
                     angles_full.append(float(err_ori_deg))
