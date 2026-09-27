@@ -132,6 +132,8 @@ FT_RUNS = [
      "-", "-", "-", "-", "-", "-", "WiSE-FT α=0.7"),
     ("ft_methods", "FT_soup_3models", "soup_uniform_3models_8031_46bf_240f",
      "-", "-", "-", "-", "-", "-", "均匀soup{L2SP0.1,L2SP0.01,LPFT}(2成员已崩)"),
+    ("ft_methods", "FT_LLRD_anneal_0.9", "783632ef-ceaa-4499-9cf9-575d94303951",
+     "-", "-", "-", "-", "-", "anneal", "LLRD0.9+退火1e-4->2e-6(双节制叠加)"),
 ]
 # ── 批2：固定 lr 1e-4 协议（无退火）──
 COMMON_FT2 = ("DINOv3预训练+新头;coordinates_DER;vitl16;batch16;augmix;seed42;"

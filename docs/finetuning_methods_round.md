@@ -214,3 +214,50 @@ python -u run.py --gpu 1 --MODEL.PEFT.method lora --MODEL.PEFT.lora_rank 1 --MOD
 python -u run.py --gpu 0 --train_backbone --freeze_backbone --MODEL.PEFT.method none --TRAIN.MAX_EPOCH 25 $COMMON
 python -u run.py --gpu 0 --resume --resume_path <s1_uuid> --train_backbone --MODEL.PEFT.method none --TRAIN.MAX_EPOCH 25 $COMMON
 ```
+
+---
+
+# 批 2.5：LLRD + 退火组合
+
+## 15. 动机与设计
+
+批 2 发现两种"节制"机制各自独立生效：退火（时间维度，LP-FT 必需）与逐层衰减（空间维度，LLRD 单独有效）。本实验将两者叠加：
+
+| 项 | 值 |
+|---|---|
+| 命令 | LLRD decay=0.9（26 组）+ cosine 退火 1e-4→2e-6，50ep，seed42 |
+| 机制 | LambdaLR 因子对所有参数组等比例作用：头 1e-4→2e-6、底层 8.9e-6→~1.8e-7 |
+
+## 16. 结果：项目历史最佳
+
+| Run | sunlamp | lightbox | val |
+|---|---|---|---|
+| **LLRD 0.9 + 退火** | **3.01** | **2.02** | **0.34±0.56** |
+| LP-FT 退火 | 4.22 | 2.89 | 0.46 |
+| LLRD 固定 1e-4 | 4.29 | 2.87 | 0.77 |
+| LoRA 忠实锚点 | 4.86 | 3.74 | 0.74 |
+| 旧锚点 e24d72fb | 4.47 | 3.65 | 0.87 |
+| （旧协议最佳 plain 续训） | 3.85 | 3.27 | 0.61 |
+
+**三指标全部刷新项目纪录**：sunlamp 3.01（原最佳 3.85）、lightbox 2.02（原最佳 2.87）、val 0.34（原最佳 0.46）。较 e24d72fb 基线：sunlamp -33%、lightbox -45%、val -61%。
+
+## 17. 判定与规律
+
+- **两种"节制"机制叠加 > 各自单独**：退火（时间）× 逐层衰减（空间）产生了超加性效果，最终模型 = 项目历史最优
+- 最终训练 loss -3.97（LLRD 固定版 -3.33、LP-FT 退火版 -3.64）——退火尾段的小 lr 精调 + 逐层衰减的浅层保护共同达成
+- 至此"encoder 必须动、但要有节制"规律的完整表述：
+  ```
+  有效实现（可叠加）:
+    时间维度: cosine 退火 1e-4→2e-6
+    空间维度: 逐层 lr 衰减 decay=0.9
+  叠加后: 3.01 / 2.02 / 0.34（项目最优）
+  ```
+
+## 18. 复现命令
+
+```bash
+python -u run.py --gpu 0 --train_backbone --MODEL.PEFT.method none --TRAIN.LLRD_DECAY 0.9 \
+  --TRAIN.LR_SCHEDULE anneal --TRAIN.LR 1e-4 --TRAIN.LR_END 2e-6 --TRAIN.MAX_EPOCH 50 \
+  --mode train --train_script train --model_type coordinates_DER --MODEL.BACKBONE_NAME dinov3_vitl16 \
+  --TRAIN.BATCH_SIZE 16 --TRAIN.AUG_TYPE augmix --seed 42 --TRAIN.LR_WARMUP 1000
+```
