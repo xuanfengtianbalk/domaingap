@@ -1,12 +1,16 @@
 #!/bin/bash
 # eval_all_mlp.sh — Evaluate all MLP .pt files across eval param combinations
-# Run from analysis/ directory
+# Run from analysis/ directory (script cd's to repo root; alpha_eval needs it
+# for ./datasets relative paths)
 
 set -uo pipefail
 
-cd "$(dirname "$0")"
-source /home/liukun/miniconda3/etc/profile.d/conda.sh
+cd "$(dirname "$0")/.."
+source "$HOME/lk/miniconda3/etc/profile.d/conda.sh"
 conda activate dinov3
+
+# ── Model being evaluated (uuid-marked output dir) ──
+UUID="783632ef-ceaa-4499-9cf9-575d94303951"
 
 # ── Model params (determine .pt file path) ──
 LOSSES=("l1" "l2" "smooth_l1")
@@ -22,10 +26,10 @@ STD_MIN_VALS=(0.0)
 STD_MAX_VALS=(1000.0 )
 MAX_SAMPLES=10000   # reduce for faster testing, set to 10000 for full eval
 
-# ── Output ──
-OUT_DIR="../outputs/alpha_cali/mlp_eval"
+# ── Output (uuid-marked dir; old outputs/alpha_eval and mlp_eval_results.csv untouched) ──
+OUT_DIR="./outputs/alpha_eval_${UUID}"
 mkdir -p "$OUT_DIR"
-CSV_PATH="$OUT_DIR/mlp_eval_results.csv"
+CSV_PATH="$OUT_DIR/mlp_eval_results_${UUID}.csv"
 
 echo "pt_file,split,raw,keep,loss,lr,std_min,std_max,std_excl_min,corr_excl,baseline_angle_mean,baseline_angle_std,baseline_dist_mean,baseline_n,excluded_angle_mean,excluded_angle_std,excluded_dist_mean,excluded_n,corrected_angle_mean,corrected_angle_std,corrected_dist_mean,corrected_n,baseline_unc_angle_mean,baseline_unc_angle_std,baseline_unc_dist_mean,baseline_unc_n,excluded_unc_angle_mean,excluded_unc_angle_std,excluded_unc_dist_mean,excluded_unc_n,corrected_unc_angle_mean,corrected_unc_angle_std,corrected_unc_dist_mean,corrected_unc_n" > "$CSV_PATH"
 
@@ -43,7 +47,7 @@ for LR in "${LRS[@]}"; do
     LR_FMT=$(python -c "print($LR)")
 
     FNAME="alpha_mlp_fgsm_augmix_${LOSS}_lr${LR_FMT}_raw${RAW}_keep${KEEP_FILE}_excl_cx0.0_cy0.04_cz0.165_rx0.05_ry0.05_rz0.05"
-    PT="../outputs/alpha_cali/${FNAME}.pt"
+    PT="./outputs/alpha_cali/${FNAME}.pt"
 
     if [ ! -f "$PT" ]; then
         echo "SKIP $FNAME (missing .pt)"
@@ -66,7 +70,7 @@ for LR in "${LRS[@]}"; do
 
         echo "  [$TOTAL] split=$SPLIT corr_excl=$CORR"
 
-        python -u alpha_eval.py \
+        python -u analysis/alpha_eval.py \
             --alpha_mlp "$PT" \
             --splits "$SPLIT" \
             --max_samples "$MAX_SAMPLES" \
@@ -74,11 +78,13 @@ for LR in "${LRS[@]}"; do
             --std_min "$SMIN" \
             --std_max "$SMAX" \
             --no_sweep \
+            --uuid "$UUID" \
+            --out_dir "$OUT_DIR" \
             $CORR_FLAG \
             2>&1 | grep -E "^(===|  BASELINE|  EXCLUDED|  CORRECTED|  →|Loaded|Model:|Error|Traceback)" || true
 
         # Parse output JSON
-        JSON_PATH="../outputs/alpha_eval/${SPLIT}.json"
+        JSON_PATH="$OUT_DIR/${SPLIT}.json"
         if [ -f "$JSON_PATH" ]; then
             ROW=$(python -c "
 import json

@@ -197,7 +197,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
              excl_mode: str = "and",
              excl_sweep_r: list = None, std_excl_min: float = 0.0,
-             alpha_mlp: str = None):
+             alpha_mlp: str = None, out_dir: str = None):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -223,7 +223,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         mlp_model = load_correction_mlp(alpha_mlp, device)
         print(f"Loaded MLP model from {alpha_mlp}")
 
-    out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
+    if out_dir is None:
+        out_dir = os.path.join(PROJECT_ROOT, "outputs", "alpha_eval")
+    else:
+        out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     if uuid is None:
@@ -671,6 +674,8 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_mlp", type=str, \
                         default='outputs/alpha_cali/alpha_mlp_fgsm_augmix_l1_lr0.001_raw0_keep1_excl_cx0.045_cy0.057_cz0.16_rx0.05_ry0.05_rz0.05.pt',
                         help="Use trained MLP model instead of CSV lookup table")
+    parser.add_argument("--out_dir", type=str, default=None,
+                        help="Output directory (default: outputs/alpha_eval)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -687,4 +692,4 @@ if __name__ == "__main__":
     print(args.corr_excl)
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
              args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min,
-             args.alpha_mlp)
+             args.alpha_mlp, args.out_dir)
