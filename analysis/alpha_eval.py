@@ -7,7 +7,7 @@ Run: python alpha_eval.py --splits sunlamp lightbox --std_threshold 1.0
 """
 
 from __future__ import annotations
-import sys, os, json, csv, math, argparse, numpy as np
+import sys, os, json, csv, math, argparse, glob, numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -447,32 +447,82 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
 # ── exclude ablation mode ────────────────────────────────────────────────────
 
-# Exclusion ablation configs: baseline + legacy + single-variable ablation
-# around zoneA_default (c=(0.0,0.04,0.165), r=0.05, mode=or, std_excl_min=0.01).
-# GT ranges (config.yaml): x [-0.57,0.57], y [-0.52,0.60], z [0.00,0.33].
-EXCL_ABLATION_CONFIGS = [
-    # ── reference ──
-    ("baseline_no_excl", (0.0, 0.04, 0.165), (0.0, 0.0, 0.0), "or", 0.0),
-    ("zoneA_default",    (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
-    ("zoneB_legacy",     (0.045, 0.057, 0.16), (0.05, 0.05, 0.05), "or", 0.01),
-    # ── single-variable: zone center (one axis at a time) ──
-    ("cx_minus0.1", (0.0 - 0.1, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
-    ("cx_plus0.1",  (0.0 + 0.1, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
-    ("cy_0.00",     (0.0, 0.00, 0.165),       (0.05, 0.05, 0.05), "or", 0.01),
-    ("cy_0.08",     (0.0, 0.08, 0.165),       (0.05, 0.05, 0.05), "or", 0.01),
-    ("cz_0.10",     (0.0, 0.04, 0.10),        (0.05, 0.05, 0.05), "or", 0.01),
-    ("cz_0.23",     (0.0, 0.04, 0.23),        (0.05, 0.05, 0.05), "or", 0.01),
-    # ── single-variable: radius ──
-    ("r_0.025", (0.0, 0.04, 0.165), (0.025, 0.025, 0.025), "or", 0.01),
-    ("r_0.10",  (0.0, 0.04, 0.165), (0.10, 0.10, 0.10),     "or", 0.01),
-    ("r_0.15",  (0.0, 0.04, 0.165), (0.15, 0.15, 0.15),     "or", 0.01),
-    # ── single-variable: uncertainty threshold ──
-    ("std_0.0",   (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.0),
-    ("std_0.005", (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.005),
-    ("std_0.02",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.02),
-    ("std_0.05",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.05),
-    # ── single-variable: mode ──
-    ("mode_and",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "and", 0.01),
+# Exclusion ablation grid: reproduced 1:1 from the original old-model sweep
+# (outputs/alpha_eval/ablation_sunlamp.csv, 72 combos, same enumeration order).
+# Fields: excl_mode, center, cx, cy, cz, rz_mode, rx, ry, rz, std_excl_min
+_EXCL_ABLATION_GRID = [
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.025, 0.025, 0.025, 0.01),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.025, 0.025, 0.0125, 0.01),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.05, 0.05, 0.05, 0.01),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.05, 0.05, 0.025, 0.01),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'uniform', 0.1, 0.1, 0.1, 0.01),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.0025),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.0025),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.005),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.005),
+    ('and', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.01),
+    ('or', 'C1', 0.045, 0.057, 0.16, 'z_half', 0.1, 0.1, 0.05, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.025, 0.025, 0.025, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.025, 0.025, 0.0125, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.05, 0.05, 0.05, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.05, 0.05, 0.025, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'uniform', 0.1, 0.1, 0.1, 0.01),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.0025),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.0025),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.005),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.005),
+    ('and', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.01),
+    ('or', 'C2', 0.0, 0.04, 0.165, 'z_half', 0.1, 0.1, 0.05, 0.01),
 ]
 
 
@@ -503,11 +553,13 @@ def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb)
 def _excl_config_worker(job):
     """One process per exclusion config: PnP on saved raw predictions (no network).
 
-    Returns (cfg_name, {split: (angles, dists, deltas, masked_fracs)}) where
-    deltas are per-image paired excluded-minus-baseline angle errors and
-    masked_fracs the per-image fraction of pixels excluded.
+    job = (grid_row, raw_dir, splits, K, baseline_dir) where grid_row is a
+    tuple (excl_mode, center, cx, cy, cz, rz_mode, rx, ry, rz, std_excl_min).
+    Returns (grid_row, {split: (angles, dists, deltas, masked_fracs)}).
     """
-    cfg_name, center, radius, mode, std_excl_min, raw_dir, splits, K, baseline_dir = job
+    (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), raw_dir, splits, K, baseline_dir = job
+    center = (cx, cy, cz)
+    radius = (rx, ry, rz)
     per_split = {}
     for split in splits:
         sp_dir = os.path.join(raw_dir, split)
@@ -539,7 +591,7 @@ def _excl_config_worker(job):
             if idx < len(b_full) and np.isfinite(b_full[idx]):
                 deltas.append(float(err_ori_deg) - float(b_full[idx]))
         per_split[split] = (angles, dists, deltas, mfracs)
-    return cfg_name, per_split
+    return (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), per_split
 
 
 def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all"):
@@ -571,19 +623,28 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
     baseline = {}
 
     if phase in ("all", "dump"):
-        model, bc = load_model(uuid, mt[0], bb, device)
-        model.eval()
+        model = None  # loaded lazily, only when a forward is actually needed
         for split in splits:
             sp_dir = os.path.join(raw_dir, split)
             os.makedirs(sp_dir, exist_ok=True)
             dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
+            n_expected = len(dl.dataset)
+            n_existing = len(glob.glob(os.path.join(sp_dir, "img_*.npz")))
+            baseline_path = os.path.join(out_dir, f"baseline_{split}.npz")
+            if os.path.exists(baseline_path) and n_existing >= n_expected:
+                print(f"[excl ablation dump] {split}: complete "
+                      f"(npz={n_existing}/{n_expected}, baseline exists) — skipped",
+                      flush=True)
+                continue
             angles, dists = [], []
             angles_full, dists_full = [], []
+            n_skipped = 0
             for i, (samples, targets) in enumerate(tqdm(dl, desc=f"dump {split}", ncols=80)):
                 npz_path = os.path.join(sp_dir, f"img_{i:06d}.npz")
                 if os.path.exists(npz_path):
                     # resume: npz already dumped, skip the network forward,
                     # recompute baseline from the saved arrays (no network)
+                    n_skipped += 1
                     d = np.load(npz_path)
                     c = d["c"]
                     mask_map = d["mask"]
@@ -591,6 +652,9 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
                     rg_t = torch.from_numpy(d["r_gt"])
                     gtb_np = d["boxes"]
                 else:
+                    if model is None:
+                        model, bc = load_model(uuid, mt[0], bb, device)
+                        model.eval()
                     image = samples.to(device)
                     gtbbox = torch.round(targets["boxes"].squeeze())
                     qgt = targets["q_gt"].squeeze()
@@ -632,7 +696,8 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             np.savez(os.path.join(out_dir, f"baseline_{split}.npz"),
                      angles=np.array(angles), dists=np.array(dists),
                      angles_full=np.array(angles_full), dists_full=np.array(dists_full))
-            print(f"[excl ablation dump] {split}: {i+1} images, baseline n={len(angles)}",
+            print(f"[excl ablation dump] {split}: {i+1} images "
+                  f"(skipped={n_skipped}, forward={i+1-n_skipped}), baseline n={len(angles)}",
                   flush=True)
         print("[excl ablation] dump phase done", flush=True)
 
@@ -641,8 +706,8 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             b = np.load(os.path.join(out_dir, f"baseline_{split}.npz"))
             baseline[split] = (b["angles"].tolist(), b["dists"].tolist())
 
-        jobs = [(name, ctr, rad, mode, stdm, raw_dir, splits, K, out_dir)
-                for name, ctr, rad, mode, stdm in EXCL_ABLATION_CONFIGS]
+        jobs = [(grid_row, raw_dir, splits, K, out_dir)
+                for grid_row in _EXCL_ABLATION_GRID]
         if n_proc > 1 and len(jobs) > 1:
             import multiprocessing as mp
             ctx = mp.get_context("spawn")
@@ -657,27 +722,40 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             a = np.array(arr)
             return f"{a.mean():.4f}", f"{a.std():.4f}", f"{len(a)}"
 
+        def _pcts(arr):
+            if not arr:
+                return "", "", ""
+            a = np.array(arr)
+            return (f"{np.percentile(a, 25):.4f}", f"{np.percentile(a, 50):.4f}",
+                    f"{np.percentile(a, 75):.4f}")
+
         csv_path = os.path.join(out_dir, "excl_ablation_results.csv")
         with open(csv_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["config", "split", "baseline_angle_mean", "baseline_angle_std",
+            w.writerow(["excl_mode", "center", "rz_mode", "rx", "ry", "rz",
+                        "std_excl_min", "split",
+                        "baseline_angle_mean", "baseline_angle_std",
                         "baseline_dist_mean", "baseline_n",
                         "excluded_angle_mean", "excluded_angle_std",
-                        "excluded_dist_mean", "excluded_n",
-                        "delta_angle_mean", "delta_angle_std",
-                        "masked_frac_mean"])
-            for cfg_name, per_split in results:
+                        "excluded_angle_p25", "excluded_angle_p50", "excluded_angle_p75",
+                        "excluded_dist_mean", "excluded_dist_std", "excluded_n",
+                        "delta_angle_mean", "delta_angle_std", "masked_frac_mean"])
+            for (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, stdm), per_split in results:
                 for split in splits:
                     b_angles, b_dists = baseline[split]
                     bm, bstd, bn = _stats(b_angles)
                     bdm = f"{np.mean(b_dists):.4f}" if b_dists else ""
                     e_angles, e_dists, deltas, mfracs = per_split[split]
                     em, estd, en = _stats(e_angles)
-                    edm = f"{np.mean(e_dists):.4f}" if e_dists else ""
-                    dm, dstd, dn = _stats(deltas)
+                    edm, edstd, _ = _stats(e_dists)
+                    ep25, ep50, ep75 = _pcts(e_angles)
+                    dm, dstd, _ = _stats(deltas)
                     mfm = f"{np.mean(mfracs):.4f}" if mfracs else ""
-                    w.writerow([cfg_name, split, bm, bstd, bdm, bn,
-                                em, estd, edm, en, dm, dstd, mfm])
+                    w.writerow([mode, center_name, rzm, f"{rx:g}", f"{ry:g}", f"{rz:g}",
+                                f"{stdm:g}", split,
+                                bm, bstd, bdm, bn,
+                                em, estd, ep25, ep50, ep75, edm, edstd, en,
+                                dm, dstd, mfm])
         print(f"[excl ablation] results -> {csv_path}")
 
         # raw dump is kept for reproducibility / re-sweeps
