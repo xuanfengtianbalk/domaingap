@@ -445,7 +445,193 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             _plot_pred_vs_std(std_preds, std_ts, std_epi, std_alea, out_dir, split)
 
 
-# ── exclusion ratio sweep ─────────────────────────────────────────────────────
+# ── exclude ablation mode ────────────────────────────────────────────────────
+
+EXCL_ABLATION_CONFIGS = [
+    ("no_excl_r0",      (0.0, 0.04, 0.165),  (0.0, 0.0, 0.0),     "or", 0.01),
+    ("zoneA_default",   (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.01),
+    ("zoneB_legacy",    (0.045, 0.057, 0.16), (0.05, 0.05, 0.05), "or", 0.01),
+    ("zoneA_r2x",       (0.0, 0.04, 0.165),  (0.10, 0.10, 0.10),  "or", 0.01),
+    ("zoneA_rhalf",     (0.0, 0.04, 0.165),  (0.025, 0.025, 0.025), "or", 0.01),
+    ("zoneA_std0",      (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.0),
+    ("zoneA_std002",    (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.02),
+    ("zoneA_mode_and",  (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "and", 0.01),
+]
+
+
+def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb):
+    """Exclusion-zone + uncertainty mask. Semantics identical to the inline
+    block of evaluate() (and/or over 3 axes, then ts_scalar > std_excl_min)."""
+    if mode == "and":
+        mask = np.ones(c_np.shape[1:], dtype=bool)
+        op = np.logical_and
+    else:
+        mask = np.zeros(c_np.shape[1:], dtype=bool)
+        op = np.logical_or
+    for ax in range(3):
+        mask = op(mask, (c_np[ax] >= center[ax] - radius[ax]) &
+                        (c_np[ax] <= center[ax] + radius[ax]))
+    if std_excl_min > 0:
+        a_np = np.exp(loga) + 1.0 + 1e-6
+        b_np = np.exp(logb) + 1e-6
+        v_np = np.exp(logl) + 1e-6
+        epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+        alea_var = b_np / (a_np - 1 + 1e-12)
+        ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+        ts_scalar = np.sqrt((ts_3d ** 2).sum(axis=0))
+        mask = mask & (ts_scalar > std_excl_min)
+    return mask
+
+
+def _excl_config_worker(job):
+    """One process per exclusion config: PnP on saved raw predictions (no network)."""
+    cfg_name, center, radius, mode, std_excl_min, raw_dir, splits, K = job
+    per_split = {}
+    for split in splits:
+        sp_dir = os.path.join(raw_dir, split)
+        names = sorted(os.listdir(sp_dir), key=lambda x: int(x.split("_")[1].split(".")[0]))
+        angles, dists = [], []
+        for name in names:
+            d = np.load(os.path.join(sp_dir, name))
+            c_np = d["c"]                       # (3, H, W) raw
+            mask_bool = (torch.sigmoid(torch.from_numpy(d["mask"])) > 0.5).cpu().numpy()  # (1,H,W)
+            c_np[~np.broadcast_to(mask_bool, c_np.shape)] = float("nan")
+            excl_mask = _build_excl_mask(c_np, center, radius, mode, std_excl_min,
+                                         d["logl"], d["loga"], d["logb"])
+            c_np[:, excl_mask] = float("nan")
+            coormap_np = to_pnp_coors(torch.from_numpy(c_np))
+            gtb = d["boxes"]
+            try:
+                is_true, qvecs, tvecs = pose_calculats_from_coors(K, coormap_np, gtb)
+            except Exception:
+                is_true, qvecs, tvecs = False, None, None
+            if not is_true:
+                continue
+            err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(
+                qvecs, tvecs, torch.from_numpy(d["q_gt"]), torch.from_numpy(d["r_gt"]), is_true)
+            angles.append(float(err_ori_deg))
+            dists.append(float(err_r_abs))
+        per_split[split] = (angles, dists)
+    return cfg_name, per_split
+
+
+def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all"):
+    """Two-phase exclusion ablation.
+
+    phase="dump":  network forward once per split, save raw predictions +
+                   baseline PnP results to disk (raw_{split}/img_*.npz,
+                   baseline_{split}.npz).
+    phase="sweep": offline parallel sweep over exclusion configs using the
+                   dumped data (no network); writes excl_ablation_results.csv
+                   and removes the raw dump afterwards.
+    phase="all":   dump then sweep in one run.
+    """
+    import yaml as _yaml
+    if uuid is None:
+        with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
+            uuid = _yaml.safe_load(f)["pairwise"]["uuid_1"]
+    if out_dir is None:
+        out_dir = os.path.join(PROJECT_ROOT, "outputs", f"excl_ablation_{uuid}")
+    else:
+        out_dir = os.path.abspath(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    from analysis_utils import get_model_type_from_traininfo
+    mt, bb = get_model_type_from_traininfo(uuid)
+    raw_dir = os.path.join(out_dir, "raw")
+    K = Camera.K
+
+    baseline = {}
+
+    if phase in ("all", "dump"):
+        model, bc = load_model(uuid, mt[0], bb, device)
+        model.eval()
+        for split in splits:
+            sp_dir = os.path.join(raw_dir, split)
+            os.makedirs(sp_dir, exist_ok=True)
+            dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
+            angles, dists = [], []
+            for i, (samples, targets) in enumerate(tqdm(dl, desc=f"dump {split}", ncols=80)):
+                image = samples.to(device)
+                gtbbox = torch.round(targets["boxes"].squeeze())
+                qgt = targets["q_gt"].squeeze()
+                rgt = targets["r_gt"].squeeze()
+                with torch.no_grad(), torch.amp.autocast("cuda"):
+                    outputs_raw = model(image)
+                c = outputs_raw["c"].squeeze(0).cpu().numpy()
+                logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
+                loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
+                logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
+                mask_map = outputs_raw["mask"].squeeze(0).cpu().numpy()
+                np.savez_compressed(os.path.join(sp_dir, f"img_{i:06d}.npz"),
+                                    c=c, logl=logl, loga=loga, logb=logb, mask=mask_map,
+                                    q_gt=qgt.numpy(), r_gt=rgt.numpy(),
+                                    boxes=gtbbox.numpy())
+                # BASELINE (model-mask only) computed in-memory during the dump
+                c_b = c.copy()
+                m_b = (torch.sigmoid(torch.from_numpy(mask_map)) > 0.5).cpu().numpy()  # (1,H,W)
+                c_b[~np.broadcast_to(m_b, c_b.shape)] = float("nan")
+                try:
+                    is_true, qvecs, tvecs = pose_calculats_from_coors(
+                        K, to_pnp_coors(torch.from_numpy(c_b)), gtbbox.numpy())
+                except Exception:
+                    is_true, qvecs, tvecs = False, None, None
+                if is_true:
+                    err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(
+                        qvecs, tvecs, qgt, rgt, is_true)
+                    angles.append(float(err_ori_deg))
+                    dists.append(float(err_r_abs))
+            baseline[split] = (angles, dists)
+            np.savez(os.path.join(out_dir, f"baseline_{split}.npz"),
+                     angles=np.array(angles), dists=np.array(dists))
+            print(f"[excl ablation dump] {split}: {i+1} images, baseline n={len(angles)}",
+                  flush=True)
+        print("[excl ablation] dump phase done", flush=True)
+
+    if phase in ("all", "sweep"):
+        for split in splits:
+            b = np.load(os.path.join(out_dir, f"baseline_{split}.npz"))
+            baseline[split] = (b["angles"].tolist(), b["dists"].tolist())
+
+        jobs = [(name, ctr, rad, mode, stdm, raw_dir, splits, K)
+                for name, ctr, rad, mode, stdm in EXCL_ABLATION_CONFIGS]
+        if n_proc > 1 and len(jobs) > 1:
+            import multiprocessing as mp
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=min(n_proc, len(jobs))) as pool:
+                results = pool.map(_excl_config_worker, jobs)
+        else:
+            results = [_excl_config_worker(j) for j in jobs]
+
+        def _stats(arr):
+            if not arr:
+                return "", "", ""
+            a = np.array(arr)
+            return f"{a.mean():.4f}", f"{a.std():.4f}", f"{len(a)}"
+
+        csv_path = os.path.join(out_dir, "excl_ablation_results.csv")
+        with open(csv_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["config", "split", "baseline_angle_mean", "baseline_angle_std",
+                        "baseline_dist_mean", "baseline_n",
+                        "excluded_angle_mean", "excluded_angle_std",
+                        "excluded_dist_mean", "excluded_n"])
+            for cfg_name, per_split in results:
+                for split in splits:
+                    b_angles, b_dists = baseline[split]
+                    bm, bstd, bn = _stats(b_angles)
+                    bdm = f"{np.mean(b_dists):.4f}" if b_dists else ""
+                    e_angles, e_dists = per_split[split]
+                    em, estd, en = _stats(e_angles)
+                    edm = f"{np.mean(e_dists):.4f}" if e_dists else ""
+                    w.writerow([cfg_name, split, bm, bstd, bdm, bn, em, estd, edm, en])
+        print(f"[excl ablation] results -> {csv_path}")
+
+        # free raw storage after success
+        import shutil
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        print(f"[excl ablation] raw npz removed ({raw_dir})")
+
 
 def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
                corr_excl, sweep_r, std_excl_min, out_dir, split, device, mlp_model=None):
@@ -688,6 +874,12 @@ if __name__ == "__main__":
                         help="Output directory (default: outputs/alpha_eval)")
     parser.add_argument("--no_unc", action="store_true", default=False,
                         help="Skip uncertainty-weighted (LM) PnP evaluations")
+    parser.add_argument("--excl_ablation", action="store_true", default=False,
+                        help="Exclude-ablation mode: network once, offline sweep of exclusion configs")
+    parser.add_argument("--excl_proc", type=int, default=8,
+                        help="excl_ablation: number of parallel processes (one per config)")
+    parser.add_argument("--excl_phase", choices=["all", "dump", "sweep"], default="all",
+                        help="excl_ablation: run dump (network) and/or sweep (offline) phase")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -701,6 +893,11 @@ if __name__ == "__main__":
         sweep_r = args.excl_sweep_r
     else:
         sweep_r = DEFAULT_SWEEP
+    if args.excl_ablation:
+        run_excl_ablation(args.uuid, args.splits, args.max_samples, args.device,
+                          args.out_dir, args.excl_proc, args.excl_phase)
+        sys.exit(0)
+
     print(args.corr_excl)
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
              args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min,
