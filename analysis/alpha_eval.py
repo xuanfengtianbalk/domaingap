@@ -197,7 +197,7 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
              excl_center: tuple = None, excl_radius: tuple = None, corr_excl: bool = False,
              excl_mode: str = "and",
              excl_sweep_r: list = None, std_excl_min: float = 0.0,
-             alpha_mlp: str = None, out_dir: str = None):
+             alpha_mlp: str = None, out_dir: str = None, no_unc: bool = False):
     """Run alpha-corrected PnP evaluation on each split.
 
     Args:
@@ -278,7 +278,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             angle_base, dist_base, ok_base = run_pnp(outputs_raw, gtbbox, qgt, rgt)
 
             # ── BASELINE + uncertainty-weighted PnP ──
-            angle_base_unc, dist_base_unc, ok_base_unc = run_pnp_unc(outputs_raw["c"], outputs_raw, gtbbox, qgt, rgt)
+            if not no_unc:
+                angle_base_unc, dist_base_unc, ok_base_unc = run_pnp_unc(outputs_raw["c"], outputs_raw, gtbbox, qgt, rgt)
+            else:
+                angle_base_unc = dist_base_unc = ok_base_unc = None
 
             # ── exclusion filter (shared for EXCLUDED + optional CORRECTED) ──
             angle_excl = dist_excl = ok_excl = None
@@ -315,7 +318,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
                 angle_excl, dist_excl, ok_excl = run_pnp(outputs_excl, gtbbox, qgt, rgt)
 
                 # ── EXCLUDED + uncertainty-weighted PnP ──
-                angle_excl_unc, dist_excl_unc, ok_excl_unc = run_pnp_unc(excl_c, outputs_raw, gtbbox, qgt, rgt)
+                if not no_unc:
+                    angle_excl_unc, dist_excl_unc, ok_excl_unc = run_pnp_unc(excl_c, outputs_raw, gtbbox, qgt, rgt)
 
             # ── corrected: optional exclusion → alpha correction ──
             if has_excl and corr_excl:
@@ -335,7 +339,10 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             angle_corr, dist_corr, ok_corr = run_pnp(outputs_corr, gtbbox, qgt, rgt)
 
             # ── CORRECTED + uncertainty-weighted PnP ──
-            angle_corr_unc, dist_corr_unc, ok_corr_unc = run_pnp_unc(coords_corr, outputs_raw, gtbbox, qgt, rgt)
+            if not no_unc:
+                angle_corr_unc, dist_corr_unc, ok_corr_unc = run_pnp_unc(coords_corr, outputs_raw, gtbbox, qgt, rgt)
+            else:
+                angle_corr_unc = dist_corr_unc = ok_corr_unc = None
 
             if ok_base:
                 base_angles.append(angle_base)
@@ -401,13 +408,15 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             "std_range": {"min": std_min, "max": std_max},
             "BASELINE":  {"angle": stats(base_angles), "dist": stats(base_dists)},
             "CORRECTED": {"angle": stats(corr_angles), "dist": stats(corr_dists)},
-            "BASELINE_with_unc":  {"angle": stats(unc_base_angles), "dist": stats(unc_base_dists)},
-            "CORRECTED_with_unc": {"angle": stats(unc_corr_angles), "dist": stats(unc_corr_dists)},
             "per_image": per_image,
         }
+        if not no_unc:
+            result["BASELINE_with_unc"] = {"angle": stats(unc_base_angles), "dist": stats(unc_base_dists)}
+            result["CORRECTED_with_unc"] = {"angle": stats(unc_corr_angles), "dist": stats(unc_corr_dists)}
         if has_excl:
             result["EXCLUDED"] = {"angle": stats(excl_angles), "dist": stats(excl_dists)}
-            result["EXCLUDED_with_unc"] = {"angle": stats(unc_excl_angles), "dist": stats(unc_excl_dists)}
+            if not no_unc:
+                result["EXCLUDED_with_unc"] = {"angle": stats(unc_excl_angles), "dist": stats(unc_excl_dists)}
 
         base = os.path.join(out_dir, split)
         with open(f"{base}.json", "w") as f:
@@ -425,10 +434,11 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
         if has_excl:
             print(f"  EXCLUDED:   angle={result['EXCLUDED']['angle']['mean']:.2f}° ± {result['EXCLUDED']['angle']['std']:.2f}  dist={result['EXCLUDED']['dist']['mean']:.4f}  n={result['EXCLUDED']['angle']['n']}")
         print(f"  CORRECTED:  angle={result['CORRECTED']['angle']['mean']:.2f}° ± {result['CORRECTED']['angle']['std']:.2f}  dist={result['CORRECTED']['dist']['mean']:.4f}  n={result['CORRECTED']['angle']['n']}")
-        print(f"  BASELINE_with_unc:  angle={result['BASELINE_with_unc']['angle']['mean']:.2f}° ± {result['BASELINE_with_unc']['angle']['std']:.2f}  dist={result['BASELINE_with_unc']['dist']['mean']:.4f}  n={result['BASELINE_with_unc']['angle']['n']}")
-        if has_excl:
-            print(f"  EXCLUDED_with_unc:  angle={result['EXCLUDED_with_unc']['angle']['mean']:.2f}° ± {result['EXCLUDED_with_unc']['angle']['std']:.2f}  dist={result['EXCLUDED_with_unc']['dist']['mean']:.4f}  n={result['EXCLUDED_with_unc']['angle']['n']}")
-        print(f"  CORRECTED_with_unc: angle={result['CORRECTED_with_unc']['angle']['mean']:.2f}° ± {result['CORRECTED_with_unc']['angle']['std']:.2f}  dist={result['CORRECTED_with_unc']['dist']['mean']:.4f}  n={result['CORRECTED_with_unc']['angle']['n']}")
+        if not no_unc:
+            print(f"  BASELINE_with_unc:  angle={result['BASELINE_with_unc']['angle']['mean']:.2f}° ± {result['BASELINE_with_unc']['angle']['std']:.2f}  dist={result['BASELINE_with_unc']['dist']['mean']:.4f}  n={result['BASELINE_with_unc']['angle']['n']}")
+            if has_excl:
+                print(f"  EXCLUDED_with_unc:  angle={result['EXCLUDED_with_unc']['angle']['mean']:.2f}° ± {result['EXCLUDED_with_unc']['angle']['std']:.2f}  dist={result['EXCLUDED_with_unc']['dist']['mean']:.4f}  n={result['EXCLUDED_with_unc']['angle']['n']}")
+            print(f"  CORRECTED_with_unc: angle={result['CORRECTED_with_unc']['angle']['mean']:.2f}° ± {result['CORRECTED_with_unc']['angle']['std']:.2f}  dist={result['CORRECTED_with_unc']['dist']['mean']:.4f}  n={result['CORRECTED_with_unc']['angle']['n']}")
 
         # pred vs std plot
         if len(std_preds) > 0:
@@ -676,6 +686,8 @@ if __name__ == "__main__":
                         help="Use trained MLP model instead of CSV lookup table")
     parser.add_argument("--out_dir", type=str, default=None,
                         help="Output directory (default: outputs/alpha_eval)")
+    parser.add_argument("--no_unc", action="store_true", default=False,
+                        help="Skip uncertainty-weighted (LM) PnP evaluations")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -692,4 +704,4 @@ if __name__ == "__main__":
     print(args.corr_excl)
     evaluate(args.alpha_csv, args.splits, args.max_samples, args.std_min, args.std_max,
              args.device, args.uuid, excl_center, excl_radius, args.corr_excl, args.excl_mode, sweep_r, args.std_excl_min,
-             args.alpha_mlp, args.out_dir)
+             args.alpha_mlp, args.out_dir, args.no_unc)
