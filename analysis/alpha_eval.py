@@ -447,15 +447,32 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
 
 # ── exclude ablation mode ────────────────────────────────────────────────────
 
+# Exclusion ablation configs: baseline + legacy + single-variable ablation
+# around zoneA_default (c=(0.0,0.04,0.165), r=0.05, mode=or, std_excl_min=0.01).
+# GT ranges (config.yaml): x [-0.57,0.57], y [-0.52,0.60], z [0.00,0.33].
 EXCL_ABLATION_CONFIGS = [
-    ("no_excl_r0",      (0.0, 0.04, 0.165),  (0.0, 0.0, 0.0),     "or", 0.01),
-    ("zoneA_default",   (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.01),
-    ("zoneB_legacy",    (0.045, 0.057, 0.16), (0.05, 0.05, 0.05), "or", 0.01),
-    ("zoneA_r2x",       (0.0, 0.04, 0.165),  (0.10, 0.10, 0.10),  "or", 0.01),
-    ("zoneA_rhalf",     (0.0, 0.04, 0.165),  (0.025, 0.025, 0.025), "or", 0.01),
-    ("zoneA_std0",      (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.0),
-    ("zoneA_std002",    (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "or", 0.02),
-    ("zoneA_mode_and",  (0.0, 0.04, 0.165),  (0.05, 0.05, 0.05),  "and", 0.01),
+    # ── reference ──
+    ("baseline_no_excl", (0.0, 0.04, 0.165), (0.0, 0.0, 0.0), "or", 0.0),
+    ("zoneA_default",    (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
+    ("zoneB_legacy",     (0.045, 0.057, 0.16), (0.05, 0.05, 0.05), "or", 0.01),
+    # ── single-variable: zone center (one axis at a time) ──
+    ("cx_minus0.1", (0.0 - 0.1, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
+    ("cx_plus0.1",  (0.0 + 0.1, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.01),
+    ("cy_0.00",     (0.0, 0.00, 0.165),       (0.05, 0.05, 0.05), "or", 0.01),
+    ("cy_0.08",     (0.0, 0.08, 0.165),       (0.05, 0.05, 0.05), "or", 0.01),
+    ("cz_0.10",     (0.0, 0.04, 0.10),        (0.05, 0.05, 0.05), "or", 0.01),
+    ("cz_0.23",     (0.0, 0.04, 0.23),        (0.05, 0.05, 0.05), "or", 0.01),
+    # ── single-variable: radius ──
+    ("r_0.025", (0.0, 0.04, 0.165), (0.025, 0.025, 0.025), "or", 0.01),
+    ("r_0.10",  (0.0, 0.04, 0.165), (0.10, 0.10, 0.10),     "or", 0.01),
+    ("r_0.15",  (0.0, 0.04, 0.165), (0.15, 0.15, 0.15),     "or", 0.01),
+    # ── single-variable: uncertainty threshold ──
+    ("std_0.0",   (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.0),
+    ("std_0.005", (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.005),
+    ("std_0.02",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.02),
+    ("std_0.05",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "or", 0.05),
+    # ── single-variable: mode ──
+    ("mode_and",  (0.0, 0.04, 0.165), (0.05, 0.05, 0.05), "and", 0.01),
 ]
 
 
@@ -484,20 +501,28 @@ def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb)
 
 
 def _excl_config_worker(job):
-    """One process per exclusion config: PnP on saved raw predictions (no network)."""
-    cfg_name, center, radius, mode, std_excl_min, raw_dir, splits, K = job
+    """One process per exclusion config: PnP on saved raw predictions (no network).
+
+    Returns (cfg_name, {split: (angles, dists, deltas, masked_fracs)}) where
+    deltas are per-image paired excluded-minus-baseline angle errors and
+    masked_fracs the per-image fraction of pixels excluded.
+    """
+    cfg_name, center, radius, mode, std_excl_min, raw_dir, splits, K, baseline_dir = job
     per_split = {}
     for split in splits:
         sp_dir = os.path.join(raw_dir, split)
         names = sorted(os.listdir(sp_dir), key=lambda x: int(x.split("_")[1].split(".")[0]))
-        angles, dists = [], []
-        for name in names:
+        b = np.load(os.path.join(baseline_dir, f"baseline_{split}.npz"))
+        b_full = b["angles_full"]
+        angles, dists, deltas, mfracs = [], [], [], []
+        for idx, name in enumerate(names):
             d = np.load(os.path.join(sp_dir, name))
             c_np = d["c"]                       # (3, H, W) raw
             mask_bool = (torch.sigmoid(torch.from_numpy(d["mask"])) > 0.5).cpu().numpy()  # (1,H,W)
             c_np[~np.broadcast_to(mask_bool, c_np.shape)] = float("nan")
             excl_mask = _build_excl_mask(c_np, center, radius, mode, std_excl_min,
                                          d["logl"], d["loga"], d["logb"])
+            mfracs.append(float(excl_mask.sum()) / float(excl_mask.size))
             c_np[:, excl_mask] = float("nan")
             coormap_np = to_pnp_coors(torch.from_numpy(c_np))
             gtb = d["boxes"]
@@ -511,7 +536,9 @@ def _excl_config_worker(job):
                 qvecs, tvecs, torch.from_numpy(d["q_gt"]), torch.from_numpy(d["r_gt"]), is_true)
             angles.append(float(err_ori_deg))
             dists.append(float(err_r_abs))
-        per_split[split] = (angles, dists)
+            if idx < len(b_full) and np.isfinite(b_full[idx]):
+                deltas.append(float(err_ori_deg) - float(b_full[idx]))
+        per_split[split] = (angles, dists, deltas, mfracs)
     return cfg_name, per_split
 
 
@@ -551,6 +578,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             os.makedirs(sp_dir, exist_ok=True)
             dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
             angles, dists = [], []
+            angles_full, dists_full = [], []
             for i, (samples, targets) in enumerate(tqdm(dl, desc=f"dump {split}", ncols=80)):
                 image = samples.to(device)
                 gtbbox = torch.round(targets["boxes"].squeeze())
@@ -581,9 +609,15 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
                         qvecs, tvecs, qgt, rgt, is_true)
                     angles.append(float(err_ori_deg))
                     dists.append(float(err_r_abs))
+                    angles_full.append(float(err_ori_deg))
+                    dists_full.append(float(err_r_abs))
+                else:
+                    angles_full.append(np.nan)
+                    dists_full.append(np.nan)
             baseline[split] = (angles, dists)
             np.savez(os.path.join(out_dir, f"baseline_{split}.npz"),
-                     angles=np.array(angles), dists=np.array(dists))
+                     angles=np.array(angles), dists=np.array(dists),
+                     angles_full=np.array(angles_full), dists_full=np.array(dists_full))
             print(f"[excl ablation dump] {split}: {i+1} images, baseline n={len(angles)}",
                   flush=True)
         print("[excl ablation] dump phase done", flush=True)
@@ -593,7 +627,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             b = np.load(os.path.join(out_dir, f"baseline_{split}.npz"))
             baseline[split] = (b["angles"].tolist(), b["dists"].tolist())
 
-        jobs = [(name, ctr, rad, mode, stdm, raw_dir, splits, K)
+        jobs = [(name, ctr, rad, mode, stdm, raw_dir, splits, K, out_dir)
                 for name, ctr, rad, mode, stdm in EXCL_ABLATION_CONFIGS]
         if n_proc > 1 and len(jobs) > 1:
             import multiprocessing as mp
@@ -615,22 +649,25 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             w.writerow(["config", "split", "baseline_angle_mean", "baseline_angle_std",
                         "baseline_dist_mean", "baseline_n",
                         "excluded_angle_mean", "excluded_angle_std",
-                        "excluded_dist_mean", "excluded_n"])
+                        "excluded_dist_mean", "excluded_n",
+                        "delta_angle_mean", "delta_angle_std",
+                        "masked_frac_mean"])
             for cfg_name, per_split in results:
                 for split in splits:
                     b_angles, b_dists = baseline[split]
                     bm, bstd, bn = _stats(b_angles)
                     bdm = f"{np.mean(b_dists):.4f}" if b_dists else ""
-                    e_angles, e_dists = per_split[split]
+                    e_angles, e_dists, deltas, mfracs = per_split[split]
                     em, estd, en = _stats(e_angles)
                     edm = f"{np.mean(e_dists):.4f}" if e_dists else ""
-                    w.writerow([cfg_name, split, bm, bstd, bdm, bn, em, estd, edm, en])
+                    dm, dstd, dn = _stats(deltas)
+                    mfm = f"{np.mean(mfracs):.4f}" if mfracs else ""
+                    w.writerow([cfg_name, split, bm, bstd, bdm, bn,
+                                em, estd, edm, en, dm, dstd, mfm])
         print(f"[excl ablation] results -> {csv_path}")
 
-        # free raw storage after success
-        import shutil
-        shutil.rmtree(raw_dir, ignore_errors=True)
-        print(f"[excl ablation] raw npz removed ({raw_dir})")
+        # raw dump is kept for reproducibility / re-sweeps
+        print(f"[excl ablation] raw npz kept at {raw_dir}")
 
 
 def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radius, excl_mode,
