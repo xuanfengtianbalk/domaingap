@@ -261,3 +261,45 @@ python -u run.py --gpu 0 --train_backbone --MODEL.PEFT.method none --TRAIN.LLRD_
   --mode train --train_script train --model_type coordinates_DER --MODEL.BACKBONE_NAME dinov3_vitl16 \
   --TRAIN.BATCH_SIZE 16 --TRAIN.AUG_TYPE augmix --seed 42 --TRAIN.LR_WARMUP 1000
 ```
+
+---
+
+# 附录：FT 实验涉及的论文对应关系
+
+## A. 已实测的微调方法
+
+| 方法 | 论文 | 官方代码/参考实现 | 我们做了什么 | 结果 |
+|---|---|---|---|---|
+| LoRA | Hu et al., *LoRA: Low-Rank Adaptation of Large Language Models*, ICLR 2022, arXiv 2106.09685 | microsoft/LoRA `loralib/layers.py`（MergedLinear） | 旧版为手写变体（无参考）；后按官方逐行移植：q,v 块、kaiming A、α/r、bias 可训，r=1 | 忠实版 4.86/3.74/0.74，与旧变体相当（无增益） |
+| DoRA | Liu et al., *DoRA: Weight-Decomposed Low-Rank Adaptation*, ICML 2024, arXiv 2402.09353 | HF PEFT `use_dora=True`（`peft/tuners/lora/variants/dora.py`） | 移植到 q,v 块：W'=m·(W+BA)/‖W+BA‖c，m 初始=列范数 | 6.05/4.25/0.97（无增益，结构无感假设第 3 证） |
+| L2-SP | Li, Grandvalet, Davoine, *Explicit Inductive Bias for Transfer Learning*, ICML 2018, arXiv 1802.01483 | holyseven/TransferLearningClassification（mode 1 + train.sh） | α∈{0.1, 0.01}、β=0.01、SGD mom 0.9、梯度注入 | 崩（17.2/24.1）——官方 lr 0.01 与退火 1e-4 差 100 倍 |
+| LP-FT | Kumar et al., *Fine-Tuning can Distort Pretrained Features and Underperform Out-of-Distribution*, ICLR 2022, arXiv 2202.10054 | 无公开 repo（多个候选 404，按论文协议实现） | 25ep 冻结训头 → 25ep 联合；退火版与固定 1e-4 版 | 退火版 4.22/2.89/0.46（赢）；固定版崩 12.94（退火必要性） |
+| WiSE-FT | Wortsman et al., *Robust fine-tuning of zero-shot models*, CVPR 2022, arXiv 2109.01903 | mlfoundations/wise-ft（`_merge`: θ=(1−α)θ₀+αθ₁） | 落到 LoRA 有效权重 W+α·BA，α∈{0.3,0.5,0.7}，零训练 | 单调回升但不超锚点（无 zero-shot 头，头-增量错配） |
+| Model Soups | Wortsman et al., *Model soups: averaging weights of multiple fine-tuned models*, ICML 2022, arXiv 2203.05482 | mlfoundations/model-soups（uniform soup） | 3 模型等权平均 | 105°（2/3 成员已崩，非公平测试） |
+| LLRD | Sun et al., *How to Fine-Tune BERT for Text Classification?*, CCL 2019, arXiv 1905.05583 | 无官方 repo（BEiT/DINOv2 微调协议通行实践） | decay=0.9、26 组、全量微调；固定 1e-4 版与退火版 | 固定版 4.29/2.87/0.77；退火版 3.01/2.02/0.34 = 项目最优 |
+| LN tuning | 无单一原始论文（作为基线出现在 Surgical FT（Lee et al., ICLR 2023, arXiv 2210.11466）、BitFit（Zaken et al., ACL 2022, arXiv 2106.10199）等） | 无官方 repo | 按通行定义：backbone 冻结仅 LN + 头训练 | 6.62/4.68/0.96（差于 LoRA 锚点） |
+
+## B. 讨论过但未测的方法（出处供参考）
+
+| 方法 | 论文 | 未测原因 |
+|---|---|---|
+| SAGM | 锐度感知组最小化（具体出处未核实，讨论阶段即砍） | 需要训练组标签，单源训练集无分组 |
+| Adapter / AdaptFormer / Convpass / ViT-Adapter | Houlsby ICML 2019 / Chen NeurIPS 2022 / Jie & Deng 2022 / Chen ICLR 2023 | A 类"结构无感"假设成立后预期收益低 |
+| AdaLoRA / QLoRA / LoRA+ / PiSSA / MoRA / FacT | 各自论文（ICLR 2023 / 2023 / 2024 等） | 同上（LoRA 微调变体） |
+| Surgical FT | Lee et al., ICLR 2023, arXiv 2210.11466 | 移植成本高（TF 代码） |
+| SAM | Foret et al., ICLR 2021, arXiv 2010.01412 | 与 SAGM 同族 |
+
+## C. 早期 null 路线（训练期干预，非本轮 FT 方法）
+
+| 方法 | 论文 | 官方代码 | 结果 |
+|---|---|---|---|
+| StableNet | Zhang et al., *Deep Stable Learning for Out-of-Distribution Generalization*, CVPR 2021, arXiv 2104.07876 | xxgege/StableNet | null（全局记忆为 1×batch 简化版） |
+| L2SDG | Qiao et al., *Learning to Learn Single Domain Generalization*, CVPR 2020, arXiv 2003.13216 | 论文协议实现 | null |
+| LaSt-ViT | arXiv 2602.22394v2（本地 PDF） | ChengShiest/LAST-ViT | ≤plain（5 个注入层） |
+| RandConv（train_consistency） | Xu et al., *Robust and Generalizable Visual Representation Learning via Random Convolutions*, ICLR 2021, arXiv 2007.13003 | — | 训练协议的一部分 |
+
+## D. 出处缺口（诚实标注）
+
+1. **LN tuning**：无单一原始论文——通行做法，非单一论文提出的方法
+2. **LP-FT**：官方 repo 未能定位（试了 4 个候选均 404），按论文正文协议实现
+3. **SAGM**：出处未核实（讨论阶段即放弃）
