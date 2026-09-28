@@ -303,3 +303,58 @@ python -u run.py --gpu 0 --train_backbone --MODEL.PEFT.method none --TRAIN.LLRD_
 1. **LN tuning**：无单一原始论文——通行做法，非单一论文提出的方法
 2. **LP-FT**：官方 repo 未能定位（试了 4 个候选均 404），按论文正文协议实现
 3. **SAGM**：出处未核实（讨论阶段即放弃）
+
+---
+
+# 附录 2：EXCLUDED 排除区间消融（LLRD+anneal 模型）
+
+## 背景与协议
+
+- 模型：LLRD 0.9 + 退火（uuid 783632ef，项目最优）
+- 网格：完整复刻旧模型时代的 72 组合排除消融（`outputs/alpha_eval/ablation_sunlamp.csv` 同构）：excl_mode(and/or) × center(C1/C2) × rz_mode(uniform/z_half) × r(0.025/0.05/0.1) × std_excl_min(0.0025/0.005/0.01)
+- 实现：`analysis/alpha_eval.py --excl_ablation`，两阶段（dump 网络一遍存 npz + 离线 72 路并行 sweep），断点续跑（npz 已存在即跳过 forward，整 split 完成秒级返回），批量 forward（batch 8）
+- 结果：`outputs/excl_ablation_783632ef-.../excl_ablation_results.csv`（144 行，含 baseline/excluded/p25/p50/p75/delta/masked_frac）
+
+## 全量结果（baseline：sunlamp 3.031±6.37 / lightbox 1.996±7.84）
+
+### sunlamp 前 5（or 模式；and 模式全部 ≡ baseline，masked 比例 0%）
+
+| 配置 | excluded | Δ |
+|---|---|---|
+| C1/z_half/rx0.1/ry0.1/rz0.05/s0.0025 | 2.947 | −0.084 |
+| C1/uniform/r0.025/s0.0025 | 2.967 | −0.064 |
+| C2/uniform/r0.05/s0.0025 | 2.969 | −0.062 |
+| C2/z_half/r0.05(0.025)/s0.0025 | 2.972 | −0.059 |
+| C1/uniform/r0.05/s0.0025 | 2.973 | −0.059 |
+
+### lightbox 前 5
+
+| 配置 | excluded | Δ |
+|---|---|---|
+| C2/uniform/r0.05/s0.0025 | 1.925 | −0.071 |
+| C2/z_half/r0.05(0.025)/s0.0025 | 1.931 | −0.066 |
+| C2/z_half/r0.05(0.025)/s0.005 | 1.940 | −0.056 |
+| C2/z_half/r0.1(0.05)/s0.0025 | 1.941 | −0.055 |
+| C1/z_half/r0.1(0.05)/s0.0025 | 1.944 | −0.052 |
+
+## 判定
+
+1. **松阈值排除在新模型上稳健有益**：`std_excl_min=0.0025`（最松）两个 split 都是最优档（−0.05~−0.08°）；旧最优的 `std=0.01` 现在是最差档
+2. **大半径有害**：r=0.1 uniform（大盒）两 split 都是最差（sunlamp +0.20、lightbox +0.12）——排掉太多有用像素
+3. **旧默认配置失效**：or/C1/r0.05/s0.01（旧模型 −0.45°）在新模型上无益甚至有害
+4. **and 模式完全失效**：三轴交集在新模型预测分布下为空（masked 比例恒 0%）
+5. 最优排除的增益量级 ~0.05-0.08°（相对 ~2-3%），小于旧模型时代的 0.45°——误差分布的宽度（std 10.6→6.4）大幅收窄后，排除区间的边际价值同步收窄
+6. n=100 的测试结论（"排除全面有害"）被 n=200 和全量推翻——小样本噪声不可用于这类细粒度消融
+
+## 复现
+
+```bash
+# dump（断点续跑：npz 存在即跳过 forward）
+python -u analysis/alpha_eval.py --excl_ablation --excl_phase dump \
+  --uuid 783632ef-ceaa-4499-9cf9-575d94303951 --splits sunlamp lightbox \
+  --max_samples 10000 --device cuda:0 --excl_dump_batch 8
+# sweep（72 配置一路一进程）
+OMP_NUM_THREADS=1 python -u analysis/alpha_eval.py --excl_ablation --excl_phase sweep \
+  --uuid 783632ef-ceaa-4499-9cf9-575d94303951 --splits sunlamp lightbox \
+  --max_samples 10000 --excl_proc 72
+```

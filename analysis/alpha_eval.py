@@ -594,7 +594,7 @@ def _excl_config_worker(job):
     return (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), per_split
 
 
-def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all"):
+def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all", dump_batch=8):
     """Two-phase exclusion ablation.
 
     phase="dump":  network forward once per split, save raw predictions +
@@ -627,7 +627,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
         for split in splits:
             sp_dir = os.path.join(raw_dir, split)
             os.makedirs(sp_dir, exist_ok=True)
-            dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=1)
+            dl = build_dataloader(uuid, split, max_samples=max_samples, batch_size=dump_batch)
             n_expected = len(dl.dataset)
             n_existing = len(glob.glob(os.path.join(sp_dir, "img_*.npz")))
             baseline_path = os.path.join(out_dir, f"baseline_{split}.npz")
@@ -639,65 +639,76 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             angles, dists = [], []
             angles_full, dists_full = [], []
             n_skipped = 0
-            for i, (samples, targets) in enumerate(tqdm(dl, desc=f"dump {split}", ncols=80)):
-                npz_path = os.path.join(sp_dir, f"img_{i:06d}.npz")
-                if os.path.exists(npz_path):
-                    # resume: npz already dumped, skip the network forward,
-                    # recompute baseline from the saved arrays (no network)
-                    n_skipped += 1
-                    d = np.load(npz_path)
-                    c = d["c"]
-                    mask_map = d["mask"]
-                    qg_t = torch.from_numpy(d["q_gt"])
-                    rg_t = torch.from_numpy(d["r_gt"])
-                    gtb_np = d["boxes"]
-                else:
+            img_idx = 0
+            for samples, targets in tqdm(dl, desc=f"dump {split}", ncols=80):
+                B = samples.shape[0]
+                idxs = [img_idx + b for b in range(B)]
+                missing = [b for b in range(B)
+                           if not os.path.exists(os.path.join(sp_dir, f"img_{idxs[b]:06d}.npz"))]
+                out_m = None
+                if missing:
                     if model is None:
                         model, bc = load_model(uuid, mt[0], bb, device)
                         model.eval()
-                    image = samples.to(device)
-                    gtbbox = torch.round(targets["boxes"].squeeze())
-                    qgt = targets["q_gt"].squeeze()
-                    rgt = targets["r_gt"].squeeze()
                     with torch.no_grad(), torch.amp.autocast("cuda"):
-                        outputs_raw = model(image)
-                    c = outputs_raw["c"].squeeze(0).cpu().numpy()
-                    logl = outputs_raw["logl"].squeeze(0).cpu().numpy()
-                    loga = outputs_raw["loga"].squeeze(0).cpu().numpy()
-                    logb = outputs_raw["logb"].squeeze(0).cpu().numpy()
-                    mask_map = outputs_raw["mask"].squeeze(0).cpu().numpy()
-                    np.savez_compressed(npz_path,
-                                        c=c, logl=logl, loga=loga, logb=logb, mask=mask_map,
-                                        q_gt=qgt.numpy(), r_gt=rgt.numpy(),
-                                        boxes=gtbbox.numpy())
-                    qg_t = qgt
-                    rg_t = rgt
-                    gtb_np = gtbbox.numpy()
-                # BASELINE (model-mask only) computed in-memory during the dump
-                c_b = c.copy()
-                m_b = (torch.sigmoid(torch.from_numpy(mask_map)) > 0.5).cpu().numpy()  # (1,H,W)
-                c_b[~np.broadcast_to(m_b, c_b.shape)] = float("nan")
-                try:
-                    is_true, qvecs, tvecs = pose_calculats_from_coors(
-                        K, to_pnp_coors(torch.from_numpy(c_b)), gtb_np)
-                except Exception:
-                    is_true, qvecs, tvecs = False, None, None
-                if is_true:
-                    err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(
-                        qvecs, tvecs, qg_t, rg_t, is_true)
-                    angles.append(float(err_ori_deg))
-                    dists.append(float(err_r_abs))
-                    angles_full.append(float(err_ori_deg))
-                    dists_full.append(float(err_r_abs))
-                else:
-                    angles_full.append(np.nan)
-                    dists_full.append(np.nan)
+                        out_m = model(samples[missing].to(device))
+                k = 0
+                for b in range(B):
+                    i = idxs[b]
+                    npz_path = os.path.join(sp_dir, f"img_{i:06d}.npz")
+                    if os.path.exists(npz_path):
+                        # resume: npz already dumped, skip the network forward,
+                        # recompute baseline from the saved arrays (no network)
+                        n_skipped += 1
+                        d = np.load(npz_path)
+                        c = d["c"]
+                        mask_map = d["mask"]
+                        qg_t = torch.from_numpy(d["q_gt"])
+                        rg_t = torch.from_numpy(d["r_gt"])
+                        gtb_np = d["boxes"]
+                    else:
+                        gtbbox = torch.round(targets["boxes"][b].squeeze())
+                        qgt = targets["q_gt"][b].squeeze()
+                        rgt = targets["r_gt"][b].squeeze()
+                        c = out_m["c"][k].cpu().numpy()
+                        logl = out_m["logl"][k].cpu().numpy()
+                        loga = out_m["loga"][k].cpu().numpy()
+                        logb = out_m["logb"][k].cpu().numpy()
+                        mask_map = out_m["mask"][k].cpu().numpy()
+                        k += 1
+                        np.savez_compressed(npz_path,
+                                            c=c, logl=logl, loga=loga, logb=logb, mask=mask_map,
+                                            q_gt=qgt.numpy(), r_gt=rgt.numpy(),
+                                            boxes=gtbbox.numpy())
+                        qg_t = qgt
+                        rg_t = rgt
+                        gtb_np = gtbbox.numpy()
+                    # BASELINE (model-mask only) computed in-memory during the dump
+                    c_b = c.copy()
+                    m_b = (torch.sigmoid(torch.from_numpy(mask_map)) > 0.5).cpu().numpy()  # (1,H,W)
+                    c_b[~np.broadcast_to(m_b, c_b.shape)] = float("nan")
+                    try:
+                        is_true, qvecs, tvecs = pose_calculats_from_coors(
+                            K, to_pnp_coors(torch.from_numpy(c_b)), gtb_np)
+                    except Exception:
+                        is_true, qvecs, tvecs = False, None, None
+                    if is_true:
+                        err_ori_deg, _, err_r_abs, _, _, _ = compute_pose_error(
+                            qvecs, tvecs, qg_t, rg_t, is_true)
+                        angles.append(float(err_ori_deg))
+                        dists.append(float(err_r_abs))
+                        angles_full.append(float(err_ori_deg))
+                        dists_full.append(float(err_r_abs))
+                    else:
+                        angles_full.append(np.nan)
+                        dists_full.append(np.nan)
+                img_idx += B
             baseline[split] = (angles, dists)
             np.savez(os.path.join(out_dir, f"baseline_{split}.npz"),
                      angles=np.array(angles), dists=np.array(dists),
                      angles_full=np.array(angles_full), dists_full=np.array(dists_full))
-            print(f"[excl ablation dump] {split}: {i+1} images "
-                  f"(skipped={n_skipped}, forward={i+1-n_skipped}), baseline n={len(angles)}",
+            print(f"[excl ablation dump] {split}: {img_idx} images "
+                  f"(skipped={n_skipped}, forward={img_idx-n_skipped}), baseline n={len(angles)}",
                   flush=True)
         print("[excl ablation] dump phase done", flush=True)
 
@@ -708,11 +719,21 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
 
         jobs = [(grid_row, raw_dir, splits, K, out_dir)
                 for grid_row in _EXCL_ABLATION_GRID]
+        grid_index = {row: i for i, row in enumerate(_EXCL_ABLATION_GRID)}
         if n_proc > 1 and len(jobs) > 1:
             import multiprocessing as mp
             ctx = mp.get_context("spawn")
             with ctx.Pool(processes=min(n_proc, len(jobs))) as pool:
-                results = pool.map(_excl_config_worker, jobs)
+                results = []
+                done = 0
+                for res in pool.imap_unordered(_excl_config_worker, jobs):
+                    done += 1
+                    (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, stdm), _ = res
+                    print(f"[sweep] {done}/{len(jobs)} done: "
+                          f"{mode}/{center_name}/{rzm}/rx{rx:g}/ry{ry:g}/rz{rz:g}/s{stdm:g}",
+                          flush=True)
+                    results.append(res)
+            results.sort(key=lambda r: grid_index[r[0]])
         else:
             results = [_excl_config_worker(j) for j in jobs]
 
@@ -1009,6 +1030,8 @@ if __name__ == "__main__":
                         help="excl_ablation: number of parallel processes (one per config)")
     parser.add_argument("--excl_phase", choices=["all", "dump", "sweep"], default="all",
                         help="excl_ablation: run dump (network) and/or sweep (offline) phase")
+    parser.add_argument("--excl_dump_batch", type=int, default=8,
+                        help="excl_ablation: batch size for the dump forward pass")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -1024,7 +1047,8 @@ if __name__ == "__main__":
         sweep_r = DEFAULT_SWEEP
     if args.excl_ablation:
         run_excl_ablation(args.uuid, args.splits, args.max_samples, args.device,
-                          args.out_dir, args.excl_proc, args.excl_phase)
+                          args.out_dir, args.excl_proc, args.excl_phase,
+                          args.excl_dump_batch)
         sys.exit(0)
 
     print(args.corr_excl)
