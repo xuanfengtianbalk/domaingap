@@ -542,6 +542,33 @@ def _center_sweep_grid():
     return grid
 
 
+# top-5 centers per split from the center search (std=0), recorded 2026-09-28
+_RADIUS_SWEEP_CENTERS = [
+    ("sunlamp", (0.05, -0.05, 0.10)),
+    ("sunlamp", (0.10, 0.10, 0.10)),
+    ("sunlamp", (0.10, -0.05, 0.10)),
+    ("sunlamp", (0.05, 0.15, 0.10)),
+    ("sunlamp", (0.00, -0.05, 0.10)),
+    ("lightbox", (0.10, 0.05, 0.10)),
+    ("lightbox", (-0.10, 0.00, 0.10)),
+    ("lightbox", (0.00, 0.10, 0.15)),
+    ("lightbox", (0.00, 0.10, 0.05)),
+    ("lightbox", (0.00, 0.05, 0.10)),
+]
+_RADIUS_SWEEP_R = [0.025, 0.05, 0.075, 0.10, 0.125, 0.15]
+
+
+def _radius_sweep_grid():
+    """Radius ablation over the recorded top-5 centers per split: fixed
+    or/uniform/std_excl_min=0.0, radius swept over 6 values (60 configs)."""
+    grid = []
+    for src, (cx, cy, cz) in _RADIUS_SWEEP_CENTERS:
+        for r in _RADIUS_SWEEP_R:
+            grid.append(("or", f"{src}_{cx:g}_{cy:g}_{cz:g}_r{r:g}", cx, cy, cz,
+                         "uniform", r, r, r, 0.0))
+    return grid
+
+
 def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb):
     """Exclusion-zone + uncertainty mask. Semantics identical to the inline
     block of evaluate() (and/or over 3 axes, then ts_scalar > std_excl_min)."""
@@ -610,7 +637,7 @@ def _excl_config_worker(job):
     return (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), per_split
 
 
-def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all", dump_batch=8, center_sweep=False):
+def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all", dump_batch=8, center_sweep=False, radius_sweep=False):
     """Two-phase exclusion ablation.
 
     phase="dump":  network forward once per split, save raw predictions +
@@ -638,7 +665,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
 
     baseline = {}
 
-    if phase in ("all", "dump") and not center_sweep:
+    if phase in ("all", "dump") and not (center_sweep or radius_sweep):
         model = None  # loaded lazily, only when a forward is actually needed
         for split in splits:
             sp_dir = os.path.join(raw_dir, split)
@@ -728,12 +755,17 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
                   flush=True)
         print("[excl ablation] dump phase done", flush=True)
 
-    if phase in ("all", "sweep") or center_sweep:
+    if phase in ("all", "sweep") or center_sweep or radius_sweep:
         for split in splits:
             b = np.load(os.path.join(out_dir, f"baseline_{split}.npz"))
             baseline[split] = (b["angles"].tolist(), b["dists"].tolist())
 
-        grid = _center_sweep_grid() if center_sweep else _EXCL_ABLATION_GRID
+        if center_sweep:
+            grid = _center_sweep_grid()
+        elif radius_sweep:
+            grid = _radius_sweep_grid()
+        else:
+            grid = _EXCL_ABLATION_GRID
         jobs = [(grid_row, raw_dir, splits, K, out_dir)
                 for grid_row in grid]
         grid_index = {row: i for i, row in enumerate(grid)}
@@ -767,9 +799,10 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             return (f"{np.percentile(a, 25):.4f}", f"{np.percentile(a, 50):.4f}",
                     f"{np.percentile(a, 75):.4f}")
 
-        csv_path = os.path.join(
-            out_dir,
-            "excl_center_sweep_results.csv" if center_sweep else "excl_ablation_results.csv")
+        csv_name = ("excl_center_sweep_results.csv" if center_sweep else
+                    "excl_radius_sweep_results.csv" if radius_sweep else
+                    "excl_ablation_results.csv")
+        csv_path = os.path.join(out_dir, csv_name)
         with open(csv_path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["excl_mode", "center", "rz_mode", "rx", "ry", "rz",
@@ -1053,6 +1086,8 @@ if __name__ == "__main__":
                         help="excl_ablation: batch size for the dump forward pass")
     parser.add_argument("--excl_center_sweep", action="store_true", default=False,
                         help="excl_ablation: sweep exclusion center (fixed or/uniform/r0.05/s0.0025), sweep phase only")
+    parser.add_argument("--excl_radius_sweep", action="store_true", default=False,
+                        help="excl_ablation: radius ablation over recorded top-5 centers (std=0), sweep phase only")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -1069,7 +1104,8 @@ if __name__ == "__main__":
     if args.excl_ablation:
         run_excl_ablation(args.uuid, args.splits, args.max_samples, args.device,
                           args.out_dir, args.excl_proc, args.excl_phase,
-                          args.excl_dump_batch, args.excl_center_sweep)
+                          args.excl_dump_batch, args.excl_center_sweep,
+                          args.excl_radius_sweep)
         sys.exit(0)
 
     print(args.corr_excl)
