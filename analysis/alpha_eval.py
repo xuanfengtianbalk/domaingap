@@ -584,6 +584,20 @@ _STD_MIN_SWEEP_BASES = [
 _STD_MIN_SWEEP_VALS = [0.0, 0.0025, 0.005, 0.01, 0.02]
 
 
+_STD_GLOBAL_VALS = [0.0, 0.0025, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+
+
+def _std_global_grid():
+    """Global uncertainty-only filter (no geometric zone, no radius):
+    exclude all pixels with ts_scalar > std. radius (0,0,0) is the no-zone
+    sentinel consumed by the worker."""
+    grid = []
+    for s in _STD_GLOBAL_VALS:
+        grid.append(("or", f"global_s{s:g}", 0.0, 0.0, 0.0,
+                     "uniform", 0.0, 0.0, 0.0, s))
+    return grid
+
+
 def _std_min_sweep_grid():
     """Uncertainty-exclusion (std_excl_min) ablation over the top radius-ablation
     combos: fixed or/uniform, std_excl_min swept over 5 values (40 configs)."""
@@ -595,9 +609,18 @@ def _std_min_sweep_grid():
     return grid
 
 
-def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb):
-    """Exclusion-zone + uncertainty mask. Semantics identical to the inline
-    block of evaluate() (and/or over 3 axes, then ts_scalar > std_excl_min)."""
+def _build_excl_mask(c_np, center, radius, mode, std_excl_min, logl, loga, logb, no_zone=False):
+    """Exclusion mask. no_zone=True: global uncertainty filter only
+    (ts_scalar > std_excl_min over the whole image, no geometric zone)."""
+    if no_zone:
+        a_np = np.exp(loga) + 1.0 + 1e-6
+        b_np = np.exp(logb) + 1e-6
+        v_np = np.exp(logl) + 1e-6
+        epi_var = b_np / ((a_np - 1 + 1e-12) * (v_np + 1e-12))
+        alea_var = b_np / (a_np - 1 + 1e-12)
+        ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))
+        ts_scalar = np.sqrt((ts_3d ** 2).sum(axis=0))
+        return ts_scalar > std_excl_min
     if mode == "and":
         mask = np.ones(c_np.shape[1:], dtype=bool)
         op = np.logical_and
@@ -629,6 +652,7 @@ def _excl_config_worker(job):
     (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), raw_dir, splits, K, baseline_dir = job
     center = (cx, cy, cz)
     radius = (rx, ry, rz)
+    no_zone = (rx == 0.0 and ry == 0.0 and rz == 0.0)
     per_split = {}
     for split in splits:
         sp_dir = os.path.join(raw_dir, split)
@@ -642,7 +666,7 @@ def _excl_config_worker(job):
             mask_bool = (torch.sigmoid(torch.from_numpy(d["mask"])) > 0.5).cpu().numpy()  # (1,H,W)
             c_np[~np.broadcast_to(mask_bool, c_np.shape)] = float("nan")
             excl_mask = _build_excl_mask(c_np, center, radius, mode, std_excl_min,
-                                         d["logl"], d["loga"], d["logb"])
+                                         d["logl"], d["loga"], d["logb"], no_zone=no_zone)
             mfracs.append(float(excl_mask.sum()) / float(excl_mask.size))
             c_np[:, excl_mask] = float("nan")
             coormap_np = to_pnp_coors(torch.from_numpy(c_np))
@@ -663,7 +687,7 @@ def _excl_config_worker(job):
     return (mode, center_name, cx, cy, cz, rzm, rx, ry, rz, std_excl_min), per_split
 
 
-def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all", dump_batch=8, center_sweep=False, radius_sweep=False, std_min_sweep=False):
+def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase="all", dump_batch=8, center_sweep=False, radius_sweep=False, std_min_sweep=False, std_global=False):
     """Two-phase exclusion ablation.
 
     phase="dump":  network forward once per split, save raw predictions +
@@ -691,7 +715,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
 
     baseline = {}
 
-    if phase in ("all", "dump") and not (center_sweep or radius_sweep or std_min_sweep):
+    if phase in ("all", "dump") and not (center_sweep or radius_sweep or std_min_sweep or std_global):
         model = None  # loaded lazily, only when a forward is actually needed
         for split in splits:
             sp_dir = os.path.join(raw_dir, split)
@@ -781,7 +805,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
                   flush=True)
         print("[excl ablation] dump phase done", flush=True)
 
-    if phase in ("all", "sweep") or center_sweep or radius_sweep or std_min_sweep:
+    if phase in ("all", "sweep") or center_sweep or radius_sweep or std_min_sweep or std_global:
         for split in splits:
             b = np.load(os.path.join(out_dir, f"baseline_{split}.npz"))
             baseline[split] = (b["angles"].tolist(), b["dists"].tolist())
@@ -792,6 +816,8 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
             grid = _radius_sweep_grid()
         elif std_min_sweep:
             grid = _std_min_sweep_grid()
+        elif std_global:
+            grid = _std_global_grid()
         else:
             grid = _EXCL_ABLATION_GRID
         jobs = [(grid_row, raw_dir, splits, K, out_dir)
@@ -830,6 +856,7 @@ def run_excl_ablation(uuid, splits, max_samples, device, out_dir, n_proc, phase=
         csv_name = ("excl_center_sweep_results.csv" if center_sweep else
                     "excl_radius_sweep_results.csv" if radius_sweep else
                     "excl_unc_ablation_results.csv" if std_min_sweep else
+                    "excl_std_ablation_results.csv" if std_global else
                     "excl_ablation_results.csv")
         csv_path = os.path.join(out_dir, csv_name)
         with open(csv_path, "w", newline="") as f:
@@ -1119,6 +1146,8 @@ if __name__ == "__main__":
                         help="excl_ablation: radius ablation over recorded top-5 centers (std=0), sweep phase only")
     parser.add_argument("--excl_std_sweep", action="store_true", default=False,
                         help="excl_ablation: uncertainty-exclusion (std_excl_min) ablation over top radius combos, sweep phase only")
+    parser.add_argument("--excl_std_global", action="store_true", default=False,
+                        help="excl_ablation: global uncertainty-only filter (no zone/radius), sweep phase only")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     excl_center = (args.excl_cx, args.excl_cy, args.excl_cz) if args.excl_cx is not None else None
@@ -1136,7 +1165,8 @@ if __name__ == "__main__":
         run_excl_ablation(args.uuid, args.splits, args.max_samples, args.device,
                           args.out_dir, args.excl_proc, args.excl_phase,
                           args.excl_dump_batch, args.excl_center_sweep,
-                          args.excl_radius_sweep, args.excl_std_sweep)
+                          args.excl_radius_sweep, args.excl_std_sweep,
+                          args.excl_std_global)
         sys.exit(0)
 
     print(args.corr_excl)
