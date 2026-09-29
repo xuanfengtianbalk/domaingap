@@ -41,7 +41,9 @@ CONFIGS = [
 FEATURE_COLS = [
     "baseline_angle", "excl_angle", "delta",
     "mean_ts3d", "p50_ts3d", "p90_ts3d",
-    "mean_ts2d", "p50_ts2d", "p90_ts2d",
+    "mean_tsx", "p50_tsx", "p90_tsx",
+    "mean_tsy", "p50_tsy", "p90_tsy",
+    "mean_tsz", "p50_tsz", "p90_tsz",
     "bbox_area", "bbox_aspect", "rot_deg", "mask_frac",
     "mean_cx", "mean_cy", "mean_cz",
     "std_cx", "std_cy", "std_cz",
@@ -52,9 +54,15 @@ REL_FEATURES = [
     ("mean_ts3d", "mean_ts3d"),
     ("p50_ts3d", "p50_ts3d"),
     ("p90_ts3d", "p90_ts3d"),
-    ("mean_ts2d", "mean_ts2d"),
-    ("p50_ts2d", "p50_ts2d"),
-    ("p90_ts2d", "p90_ts2d"),
+    ("mean_tsx", "mean_tsx"),
+    ("p50_tsx", "p50_tsx"),
+    ("p90_tsx", "p90_tsx"),
+    ("mean_tsy", "mean_tsy"),
+    ("p50_tsy", "p50_tsy"),
+    ("p90_tsy", "p90_tsy"),
+    ("mean_tsz", "mean_tsz"),
+    ("p50_tsz", "p50_tsz"),
+    ("p90_tsz", "p90_tsz"),
     ("bbox_area", "bbox_area"),
     ("bbox_aspect", "bbox_aspect"),
     ("rot_deg", "rot_deg"),
@@ -69,17 +77,15 @@ REL_FEATURES = [
 
 
 def _ts_maps(logl, loga, logb):
-    """Returns (ts3d, ts2d): per-pixel scalar uncertainties.
-    ts3d = sqrt(ts_x^2+ts_y^2+ts_z^2), ts2d = sqrt(ts_x^2+ts_y^2)."""
+    """Returns ts_3d: per-pixel PER-AXIS uncertainty (3,H,W).
+    Per axis: ts_ax = sqrt(epistemic_var + aleatoric_var)."""
     a = np.exp(loga) + 1.0 + 1e-6
     b = np.exp(logb) + 1e-6
     v = np.exp(logl) + 1e-6
     epi_var = b / ((a - 1 + 1e-12) * (v + 1e-12))
     alea_var = b / (a - 1 + 1e-12)
     ts_3d = np.sqrt(np.maximum(epi_var + alea_var, 0.0))  # (3,H,W)
-    ts3d = np.sqrt((ts_3d ** 2).sum(axis=0))
-    ts2d = np.sqrt((ts_3d[0] ** 2 + ts_3d[1] ** 2))
-    return ts3d, ts2d
+    return ts_3d
 
 
 def _pnP_angle(c_np, K, gtb, q_gt, r_gt):
@@ -125,9 +131,14 @@ def _worker(job):
         if e_i is None:
             continue
 
-        ts3d, ts2d = _ts_maps(d["logl"], d["loga"], d["logb"])
+        ts_3d = _ts_maps(d["logl"], d["loga"], d["logb"])  # (3,H,W) per-axis
+        ts3d = np.sqrt((ts_3d ** 2).sum(axis=0))
         ts3d_v = ts3d[valid]
-        ts2d_v = ts2d[valid]
+        ax_stats = []
+        for ax in range(3):
+            v = ts_3d[ax][valid]
+            ax_stats += [float(v.mean()), float(np.percentile(v, 50)),
+                         float(np.percentile(v, 90))]
 
         x1, y1, x2, y2 = d["boxes"]
         w = max(x2 - x1, 1e-6)
@@ -140,7 +151,7 @@ def _worker(job):
         rows.append([
             float(b_i), e_i, e_i - float(b_i),
             float(ts3d_v.mean()), float(np.percentile(ts3d_v, 50)), float(np.percentile(ts3d_v, 90)),
-            float(ts2d_v.mean()), float(np.percentile(ts2d_v, 50)), float(np.percentile(ts2d_v, 90)),
+            *ax_stats,
             float(w * h), float(w / h),
             float(np.linalg.norm(d["r_gt"])) * 180.0 / np.pi,
             float(valid.mean()),
