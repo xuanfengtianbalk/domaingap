@@ -59,10 +59,11 @@ def load_alpha_table(csv_path: str) -> dict:
 
 def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.Tensor,
                    logb: torch.Tensor, alpha_table: dict, std_min: float, std_max: float,
-                   mlp_model=None) -> tuple:
+                   mlp_model=None, mask_map=None) -> tuple:
     """Apply per-axis alpha correction. Returns (coords_corrected, nan_mask).
 
     If mlp_model is provided, uses MLP inference instead of CSV lookup table.
+    SpatialCorrectionUNet instances take the full 2D maps (spatial context).
     """
     import numpy as np
 
@@ -94,19 +95,43 @@ def correct_coords(coords_tensor: torch.Tensor, logl: torch.Tensor, loga: torch.
     coords_np[:, nan_mask] = float("nan")
 
     if mlp_model is not None:
-        # Unified 3-axis MLP: one forward pass for all axes
-        tx_t = torch.tensor(total_std[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        px_t = torch.tensor(coords_np[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        ty_t = torch.tensor(total_std[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        py_t = torch.tensor(coords_np[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        tz_t = torch.tensor(total_std[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        pz_t = torch.tensor(coords_np[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
-        with torch.no_grad():
-            corrected_3d = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)  # (N, 3)
-        corr_np = corrected_3d.cpu().numpy()
-        coords_np[0, mid] = corr_np[:, 0]
-        coords_np[1, mid] = corr_np[:, 1]
-        coords_np[2, mid] = corr_np[:, 2]
+        from alpha_mlp import SpatialCorrectionUNet
+        if isinstance(mlp_model, SpatialCorrectionUNet):
+            # spatial correction: full-map forward, 7-channel input
+            mask_map_t = mask_map
+            if mask_map_t is None:
+                mask_map_t = torch.ones(1, 1, H, W, device=device)
+            else:
+                mask_map_t = mask_map_t.to(device)
+                if mask_map_t.dim() == 4:
+                    mask_map_t = mask_map_t[:1]
+                if mask_map_t.shape[-2:] != (H, W):
+                    mask_map_t = torch.nn.functional.interpolate(
+                        mask_map_t, size=(H, W), mode="nearest")
+            mask_bin = (torch.sigmoid(mask_map_t) > 0.5).float()
+            ts_t = torch.tensor(total_std, dtype=torch.float32, device=device).unsqueeze(0)
+            pred_t = torch.tensor(coords_np, dtype=torch.float32, device=device).unsqueeze(0)
+            x = torch.cat([pred_t, ts_t, mask_bin], dim=1)  # (1,7,H,W)
+            with torch.no_grad():
+                delta = mlp_model(x).squeeze(0)             # (3,H,W)
+            corr_full = pred_t.squeeze(0) + delta
+            corr_np = corr_full.cpu().numpy()
+            # apply std gate: low keep raw, mid corrected, high NaN (already NaN'd)
+            coords_np[:, mid] = corr_np[:, mid]
+        else:
+            # Unified 3-axis MLP: one forward pass for all axes
+            tx_t = torch.tensor(total_std[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            px_t = torch.tensor(coords_np[0][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            ty_t = torch.tensor(total_std[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            py_t = torch.tensor(coords_np[1][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            tz_t = torch.tensor(total_std[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            pz_t = torch.tensor(coords_np[2][mid], dtype=torch.float32, device=device).reshape(-1, 1)
+            with torch.no_grad():
+                corrected_3d = mlp_model(tx_t, px_t, ty_t, py_t, tz_t, pz_t)  # (N, 3)
+            corr_np = corrected_3d.cpu().numpy()
+            coords_np[0, mid] = corr_np[:, 0]
+            coords_np[1, mid] = corr_np[:, 1]
+            coords_np[2, mid] = corr_np[:, 2]
     else:
         for ax_idx, key in enumerate(["x", "y", "z"]):
             ts_ax = total_std[ax_idx]
@@ -332,7 +357,8 @@ def evaluate(alpha_csv: str, splits: list, max_samples: int | None,
             coords_corr, _ = correct_coords(
                 raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
                 raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
-                alpha_table, std_min, std_max, mlp_model)
+                alpha_table, std_min, std_max, mlp_model,
+                mask_map=outputs_raw["mask"] if mlp_model is not None else None)
 
             outputs_corr = dict(outputs_raw)
             outputs_corr["c"] = coords_corr
@@ -948,7 +974,8 @@ def _run_sweep(model, dl, alpha_table, std_min, std_max, excl_center, excl_radiu
         coords_corr, _ = correct_coords(
             raw_for_alpha["c"].clone(), raw_for_alpha["logl"].clone(),
             raw_for_alpha["loga"].clone(), raw_for_alpha["logb"].clone(),
-            alpha_table, std_min, std_max, mlp_model)
+            alpha_table, std_min, std_max, mlp_model,
+            mask_map=outputs_raw["mask"] if mlp_model is not None else None)
         outputs_corr_std = dict(outputs_raw)
         outputs_corr_std["c"] = coords_corr
         angle_corr, dist_corr, _ = run_pnp(outputs_corr_std, gtbbox, qgt, rgt)

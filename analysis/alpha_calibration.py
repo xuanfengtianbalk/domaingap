@@ -401,6 +401,101 @@ def _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
     print(f"  → {pt_path}")
 
 
+def _train_spatial_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
+                               excl_suffix, mode, out_dir, max_samples, mlp_loss="l2"):
+    """Train SpatialCorrectionUNet on augmix data (full 2D maps, spatial context)."""
+    from alpha_mlp import SpatialCorrectionUNet
+    from analysis_utils import build_mlp_dataloader
+
+    if mlp_loss == "l1":
+        loss_fn = torch.nn.functional.l1_loss
+    elif mlp_loss == "smooth_l1":
+        loss_fn = torch.nn.functional.smooth_l1_loss
+    else:
+        loss_fn = torch.nn.functional.mse_loss
+
+    unet = SpatialCorrectionUNet().to(device)
+    optimizer = torch.optim.Adam(unet.parameters(), lr=mlp_lr)
+
+    train_loader, val_loader, n_total, n_train = build_mlp_dataloader(
+        uuid, aug_type, max_samples, mlp_batch)
+    print(f"  SpatialUNet [{mlp_loss},lr={mlp_lr}]: {n_total} images ({n_train} train), "
+          f"{mlp_epochs} epochs")
+
+    for epoch in range(mlp_epochs):
+        unet.train()
+        total_loss, total_raw, n_steps = 0.0, 0.0, 0
+        for samples, targets in train_loader:
+            samples = samples.to(device)
+            with torch.no_grad(), torch.amp.autocast("cuda"):
+                out = model(samples)
+            pred = out["c"]                                    # [B,3,H,W]
+            logl = out["logl"]; loga = out["loga"]; logb = out["logb"]
+            gt = targets["coors_gt"].to(device)                # [B,3,H,W]
+            mask_b = targets["mask_gt"].to(device)             # [B,H,W]
+
+            a_v = torch.exp(loga) + 1.0 + 1e-6
+            b_v = torch.exp(logb) + 1e-6
+            v_l = torch.exp(logl) + 1e-6
+            epi = b_v / ((a_v - 1 + 1e-12) * (v_l + 1e-12))
+            alea = b_v / (a_v - 1 + 1e-12)
+            ts = torch.sqrt(torch.clamp(epi + alea, min=0.0))  # [B,3,H,W]
+            mask_pred = (torch.sigmoid(out["mask"]) > 0.5).float()  # [B,1,H,W]
+
+            x = torch.cat([pred, ts, mask_pred], dim=1)         # [B,7,H,W]
+            delta = unet(x)
+            corrected = pred + delta
+
+            valid = mask_b > 0.5
+            if not valid.any():
+                continue
+            loss = loss_fn(corrected[valid.unsqueeze(1).expand_as(corrected)],
+                           gt[valid.unsqueeze(1).expand_as(gt)])
+            raw_loss = loss_fn(pred[valid.unsqueeze(1).expand_as(pred)],
+                               gt[valid.unsqueeze(1).expand_as(gt)]).item()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            total_raw += raw_loss
+            n_steps += 1
+
+        unet.eval()
+        val_loss, val_raw, n_val = 0.0, 0.0, 0
+        with torch.no_grad():
+            for samples, targets in val_loader:
+                samples = samples.to(device)
+                with torch.amp.autocast("cuda"):
+                    out = model(samples)
+                pred = out["c"]; logl = out["logl"]; loga = out["loga"]; logb = out["logb"]
+                gt_v = targets["coors_gt"].to(device); mask_v = targets["mask_gt"].to(device)
+                a_v = torch.exp(loga) + 1.0 + 1e-6
+                b_v = torch.exp(logb) + 1e-6; v_l = torch.exp(logl) + 1e-6
+                epi = b_v / ((a_v - 1 + 1e-12) * (v_l + 1e-12))
+                alea = b_v / (a_v - 1 + 1e-12)
+                ts = torch.sqrt(torch.clamp(epi + alea, min=0.0))
+                mask_pred = (torch.sigmoid(out["mask"]) > 0.5).float()
+                x = torch.cat([pred, ts, mask_pred], dim=1)
+                corrected = pred + unet(x)
+                valid = mask_v > 0.5
+                if not valid.any():
+                    continue
+                val_loss += loss_fn(corrected[valid.unsqueeze(1).expand_as(corrected)],
+                                    gt_v[valid.unsqueeze(1).expand_as(gt_v)]).item()
+                val_raw += loss_fn(pred[valid.unsqueeze(1).expand_as(pred)],
+                                   gt_v[valid.unsqueeze(1).expand_as(gt_v)]).item()
+                n_val += 1
+        if n_steps > 0:
+            print(f"    epoch {epoch:3d}: train={total_loss/n_steps:.4f}(raw={total_raw/n_steps:.4f}) "
+                  f"val={val_loss/max(n_val,1):.4f}(raw={val_raw/max(n_val,1):.4f})")
+
+    model_name = f"alpha_mlp_spatial_{mode}_{aug_type}_{mlp_loss}_lr{mlp_lr}{excl_suffix}"
+    pt_path = os.path.join(out_dir, f"{model_name}.pt")
+    torch.save(unet.state_dict(), pt_path)
+    print(f"  → {pt_path}")
+
+
 # ── main calibration ─────────────────────────────────────────────────────────
 
 def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
@@ -410,7 +505,7 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
               mode: str = "fgsm", aug_type: str = None,
               train_mlp: bool = False, mlp_epochs: int = 100, mlp_lr: float = 1e-3,
               mlp_batch: int = 16, mlp_freq_enc: bool = True, mlp_excl: bool = True,
-              mlp_loss: str = "l2"):
+              mlp_loss: str = "l2", mlp_spatial: bool = False):
     """Run calibration and save results."""
 
     import yaml as _yaml
@@ -451,8 +546,13 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
             _excl_suffix = f"_excl_cx{excl_cx}_cy{excl_cy}_cz{excl_cz}_rx{excl_rx}_ry{excl_ry}_rz{excl_rz}"
         _out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "alpha_cali")
         os.makedirs(_out_dir, exist_ok=True)
-        _train_mlp_independent(uuid, model, device, _at, mlp_epochs, mlp_batch, mlp_lr,
-                               _excl_suffix, mode, _out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
+        if mlp_spatial:
+            _train_spatial_independent(uuid, model, device, _at, mlp_epochs, mlp_batch,
+                                       mlp_lr, _excl_suffix, mode, _out_dir, max_samples,
+                                       mlp_loss)
+        else:
+            _train_mlp_independent(uuid, model, device, _at, mlp_epochs, mlp_batch, mlp_lr,
+                                   _excl_suffix, mode, _out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
         return
 
 
@@ -728,8 +828,12 @@ def calibrate(uuid: str, epsilons: list, n_ts_bins: int = 10,
 
     # train MLP (independent augmix dataloader)
     if train_mlp:
-        _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
-                               excl_suffix, mode, out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
+        if mlp_spatial:
+            _train_spatial_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch,
+                                       mlp_lr, excl_suffix, mode, out_dir, max_samples, mlp_loss)
+        else:
+            _train_mlp_independent(uuid, model, device, aug_type, mlp_epochs, mlp_batch, mlp_lr,
+                                   excl_suffix, mode, out_dir, max_samples, mlp_freq_enc, mlp_excl, mlp_loss)
 
     result = {
         "metadata": {
@@ -1098,6 +1202,8 @@ if __name__ == "__main__":
     parser.add_argument("--mlp_keep_center", action="store_true", default=False, help="Keep center pixels in MLP training (no exclusion)")
     parser.add_argument("--mlp_loss", choices=["l1", "l2", "smooth_l1"], default="l2",
                         help="Loss function for MLP training")
+    parser.add_argument("--mlp_spatial", action="store_true", default=False,
+                        help="Train SpatialCorrectionUNet instead of per-pixel MLP")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -1107,4 +1213,5 @@ if __name__ == "__main__":
               args.excl_cx, args.excl_cy, args.excl_cz, args.excl_rx, args.excl_ry, args.excl_rz,
               args.mode, args.aug_type,
               args.train_mlp, args.mlp_epochs, args.mlp_lr, args.mlp_batch,
-              not args.mlp_raw, not args.mlp_keep_center, args.mlp_loss)
+              not args.mlp_raw, not args.mlp_keep_center, args.mlp_loss,
+              args.mlp_spatial)

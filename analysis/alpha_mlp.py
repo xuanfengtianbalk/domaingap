@@ -157,6 +157,13 @@ def train_correction_mlp(calib_preds, calib_gts, calib_ts, epsilons,
 
 def load_correction_mlp(pt_path: str, device: str = "cuda:0"):
     state = torch.load(pt_path, map_location=device, weights_only=True)
+    if "mlp.0.weight" not in state:
+        # spatial correction net (SpatialCorrectionUNet)
+        model = SpatialCorrectionUNet()
+        model.load_state_dict(state)
+        model.to(device)
+        model.eval()
+        return model
     w0 = state["mlp.0.weight"]
     use_freq = w0.shape[1] > 10
     model = UnifiedCorrectionMLP(use_freq_enc=use_freq)
@@ -164,3 +171,56 @@ def load_correction_mlp(pt_path: str, device: str = "cuda:0"):
     model.to(device)
     model.eval()
     return model
+
+
+# ── spatial (2D) correction network ─────────────────────────────────────────
+
+class _DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class SpatialCorrectionUNet(nn.Module):
+    """Spatial coordinate correction U-Net.
+
+    Input:  [B, 7, H, W] = pred coords (3) + per-axis ts (3) + model mask (1)
+    Output: [B, 3, H, W] delta; corrected = pred + delta.
+    """
+
+    def __init__(self, in_ch: int = 7, out_ch: int = 3):
+        super().__init__()
+        self.inc = _DoubleConv(in_ch, 64)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), _DoubleConv(64, 128))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), _DoubleConv(128, 256))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), _DoubleConv(256, 512))
+        self.up1 = nn.ConvTranspose2d(512, 256, 2, stride=2)
+        self.dec1 = _DoubleConv(512, 256)
+        self.up2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.dec2 = _DoubleConv(256, 128)
+        self.up3 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.dec3 = _DoubleConv(128, 64)
+        self.outc = nn.Conv2d(64, out_ch, 1)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        y = self.up1(x4)
+        y = self.dec1(torch.cat([y, x3], dim=1))
+        y = self.up2(y)
+        y = self.dec2(torch.cat([y, x2], dim=1))
+        y = self.up3(y)
+        y = self.dec3(torch.cat([y, x1], dim=1))
+        return self.outc(y)
