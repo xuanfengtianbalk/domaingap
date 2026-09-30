@@ -1,0 +1,26 @@
+{
+  "sunlamp": {
+    "baseline_angle_mean": 3.031144296488248,
+    "baseline_angle_std": 6.365471514103206,
+    "baseline_n": 2791,
+    "clipped_angle_mean": 3.0407159529734495,
+    "clipped_angle_std": 6.38619419534009,
+    "clipped_n": 2791,
+    "paired_delta_mean": 0.009571656485201004,
+    "paired_n": 2791,
+    "paired_n_benefit": 1142,
+    "paired_n_harm": 1279
+  },
+  "lightbox": {
+    "baseline_angle_mean": 1.996045021400132,
+    "baseline_angle_std": 7.842839925674861,
+    "baseline_n": 6740,
+    "clipped_angle_mean": 1.9895521435289094,
+    "clipped_angle_std": 7.82828654681991,
+    "clipped_n": 6740,
+    "paired_delta_mean": -0.00649287787122262,
+    "paired_n": 6740,
+    "paired_n_benefit": 2894,
+    "paired_n_harm": 3009
+  }
+}
